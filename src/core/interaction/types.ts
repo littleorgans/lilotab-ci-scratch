@@ -7,6 +7,7 @@ import type { Snapshot } from '../snapshot/index.ts';
 import type {
   AttemptId,
   BootId,
+  ClosedTab,
   Cursor,
   Diagnostic,
   InteractionId,
@@ -32,9 +33,12 @@ export type TimerKind = 'dwell' | 'hostDeadline' | 'idle';
 // the protocol before its handshake. closed: a popup channel ended before its handshake, or any channel after it.
 export type HostStatus = 'ready' | 'declined' | 'failed' | 'closed';
 
+type Closed = readonly ClosedTab[]; // read at each press (C-SRCH-27)
+
 export type CoreEvent =
-  | { kind: 'command'; at: Millis; source: SourceTab; binding: Binding; live: LiveFacts }
-  | { kind: 'toolbarClicked'; at: Millis; source: SourceTab; binding: Binding | null; live: LiveFacts }
+  | { kind: 'command'; at: Millis; source: SourceTab; binding: Binding; live: LiveFacts; closed: Closed }
+  | { kind: 'toolbarClicked'; at: Millis; source: SourceTab; binding: Binding | null; live: LiveFacts; closed: Closed }
+  | { kind: 'searchCommand'; at: Millis; source: SourceTab; binding: Binding | null; live: LiveFacts; closed: Closed }
   | { kind: 'tabActivated'; at: Millis; tabId: TabId; windowId: WindowId }
   | { kind: 'windowCreated'; at: Millis; windowId: WindowId; normal: boolean }
   | { kind: 'windowFocused'; at: Millis; windowId: WindowId | null } // null: WINDOW_ID_NONE; the core classifies the rest
@@ -59,8 +63,11 @@ export type Effect =
   | { kind: 'loadIcons'; attempt: AttemptId; keys: readonly (readonly (string | null)[])[] }
   | { kind: 'closeHost'; attempt: AttemptId; outcome: 'commit' | 'cancel' }
   | { kind: 'activate'; op: OpId; target: TabRef; focusWindow: boolean }
+  | { kind: 'closeTab'; tabId: TabId } // the close key (T-74, T-75); failure ignored, the later tabRemoved is the truth
+  | { kind: 'restoreTab'; sessionId: string } // commit on a recently closed row (T-78, C-SRCH-28)
   | { kind: 'checkpoint'; envelope: SessionEnvelope; reply: RequestId | null }
   | { kind: 'saveSettings'; settings: StoredSettings } // the one migration write back at boot (06 4.3)
+  | { kind: 'showBadge'; on: boolean } // init and a Tab count badge change (C-SET-27)
   | { kind: 'diagnostic'; entry: Diagnostic };
 
 export type InteractionState = 'overlayPending' | 'popupPending' | 'ready' | 'holding' | 'search';
@@ -73,9 +80,9 @@ export interface SearchState {
 
 export interface Interaction {
   id: InteractionId;
-  entry: 'shortcut' | 'toolbar';
+  entry: 'shortcut' | 'search'; // search: the toolbar icon or the Search tabs command (C-POP-09, C-KEY-12)
   source: TabRef;
-  binding: Binding | null; // null only for toolbar entry without a usable shortcut (C-POP-09)
+  binding: Binding | null; // null only for search entry without a usable shortcut (C-POP-09)
   look: Look; // frozen at the press (C-SET-12)
   quickTap: Settings['quickTap']; // frozen at the press (C-SET-12, C-SET-19)
   snapshot: Snapshot; // frozen at the press (C-HOLD-14)
@@ -87,6 +94,7 @@ export interface Interaction {
   history: boolean; // steps walk snapshot.stack; the first arrow in a hold ends it (D6)
   search: SearchState | null;
   open: boolean; // holding.open, the open list (T-68); false at the press, survives a search latch
+  gone: readonly RowRef[]; // rows closed with the close key (T-74, T-75, C-SRCH-25); never the snapshot
 }
 
 export interface Model {

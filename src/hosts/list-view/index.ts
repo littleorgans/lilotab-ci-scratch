@@ -3,7 +3,7 @@
 
 import { QUERY_MAX, type Frame, type IconSrc, type ListView, type StartView } from '../../core/protocol/index.ts';
 import type { HostSurface } from '../../core/seams.ts';
-import { sameRow, type RowRef } from '../../core/types.ts';
+import { hasRow, sameRow, type RowRef } from '../../core/types.ts';
 import { LIST_TEXT } from '../../strings.ts';
 import css from './style.css?inline';
 
@@ -20,9 +20,13 @@ export interface ListSurface extends HostSurface {
   focus(): void; // the field in search, else the list (the popup takes focus; the overlay leaves it to the page)
   inField(): boolean;
   rowAt(target: EventTarget | null): RowRef | null;
+  pageRows(): number; // the whole rows the list shows (K-32)
+  // Copies in the trusted key handler, or says it could not when text is null or the browser refuses (C-SRCH-26).
+  copy(text: string | null): void;
 }
 
 const SVG = 'http://www.w3.org/2000/svg';
+const NOTICE_MS = 2_000; // "Could not copy" (C-SRCH-26)
 const PIN = [
   {
     d: 'M10.5 1.5l4 4-1.3 1.3-.8-.4-2.5 2.5.4 3.2L9 13.4l-2.7-2.7-3.6 3.6-1-1 3.6-3.6L2.6 7l1.3-1.3 3.2.4 2.5-2.5-.4-.8z',
@@ -37,6 +41,18 @@ const SOUND = [
     'stroke-width': '1.4',
     'stroke-linecap': 'round',
     d: 'M10.5 5.5a3.5 3.5 0 0 1 0 5M12.5 3.5a6.5 6.5 0 0 1 0 9',
+  },
+];
+
+// A clock with a turning back arrow: a recently closed row, in the window marker's place (C-SRCH-27).
+const CLOSED = [
+  {
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': '1.4',
+    'stroke-linecap': 'round',
+    'stroke-linejoin': 'round',
+    d: 'M2.5 8a5.5 5.5 0 1 0 1.6-3.9L2.5 5.5M2.5 2.5v3h3M8 5v3l2 1.5',
   },
 ];
 
@@ -133,6 +149,8 @@ export function createListSurface(root: Document | ShadowRoot, flavor: Flavor): 
   list.setAttribute('aria-label', LIST_TEXT.tabs);
   const empty = el('div', 'empty');
   empty.setAttribute('role', 'status');
+  const notice = el('div', 'notice');
+  notice.setAttribute('role', 'status');
   const field = el('input', 'field');
   field.type = 'text';
   field.maxLength = QUERY_MAX;
@@ -144,9 +162,13 @@ export function createListSurface(root: Document | ShadowRoot, flavor: Flavor): 
   field.setAttribute('aria-autocomplete', 'list');
   field.setAttribute('aria-expanded', 'true');
   field.setAttribute('aria-controls', list.id);
-  panel.append(list, empty);
+  panel.append(list, empty, notice);
+  const box = 'body' in root ? root.body : root;
 
   let windows: ListView['windows'] = [];
+  let closed: ListView['closed'] = []; // the closed window, after the listed ones (05-events 4.9)
+  let gone: readonly RowRef[] = []; // hidden in hold (C-HOLD-14); search results already omit them
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   let icons: (IconSrc | null)[][] = [];
   let mode: StartView['mode'] = 'hold';
   let shownWindow = -1;
@@ -213,12 +235,15 @@ export function createListSurface(root: Document | ShadowRoot, flavor: Flavor): 
     );
   };
   const holdRows = () => Math.max(...windows.map((w) => w.rows.length)); // the tallest window (C-WIN-15)
+  const isClosed = (ref: RowRef) => ref.window === windows.length;
+  const dataOf = (ref: RowRef) => (isClosed(ref) ? closed[ref.row] : windows[ref.window]?.rows[ref.row]);
 
   // Text first; the icon box is already there, so a late icon moves nothing (C-ICON-04).
-  function rowOf({ window: w, row: r }: RowRef): HTMLLIElement {
+  function rowOf(ref: RowRef): HTMLLIElement {
+    const { window: w, row: r } = ref;
     const known = built[w]?.[r];
     if (known) return known;
-    const data = windows[w]?.rows[r] ?? { title: '', site: '', pinned: false, audible: false };
+    const data = dataOf(ref) ?? { title: '', site: '', pinned: false, audible: false };
     const li = el('li', 'row');
     li.id = `row-${String(w)}-${String(r)}`;
     li.setAttribute('role', 'option');
@@ -232,25 +257,31 @@ export function createListSurface(root: Document | ShadowRoot, flavor: Flavor): 
     }
     if (data.pinned) li.append(glyph('pin', PIN)); // C-HOLD-16
     if (data.audible) li.append(glyph('sound', SOUND)); // read at the press, never updated (C-HOLD-25)
-    const marker = el('span', w === 0 ? 'marker current' : 'marker');
-    marker.textContent = String(w + 1);
-    marker.setAttribute('aria-hidden', 'true');
-    li.append(marker);
+    if (isClosed(ref)) {
+      li.append(glyph('closed', CLOSED));
+    } else {
+      const marker = el('span', w === 0 ? 'marker current' : 'marker');
+      marker.textContent = String(w + 1);
+      marker.setAttribute('aria-hidden', 'true');
+      li.append(marker);
+    }
     (built[w] ??= [])[r] = li;
     refs.set(li, { window: w, row: r });
     return li;
   }
 
-  // The accessible name holds the title, the sound, the pinned state and, in search, the window (C-A11Y-02).
+  // The accessible name holds the title, the sound, the pinned state and, in search, the window, or Recently closed
+  // for a closed row (C-A11Y-02, C-SRCH-27).
   function place(rows: readonly RowRef[]): void {
     const solo = windows.length === 1;
     const items = rows.map((ref) => {
       const li = rowOf(ref);
-      const data = windows[ref.window]?.rows[ref.row];
+      const data = dataOf(ref);
       const parts = [li.querySelector('.title')?.textContent ?? ''];
       if (data?.audible) parts.push(LIST_TEXT.audible);
       if (data?.pinned) parts.push(LIST_TEXT.pinned);
-      if (mode === 'search' && !solo) parts.push(windowName(ref.window));
+      if (isClosed(ref)) parts.push(LIST_TEXT.closed);
+      else if (mode === 'search' && !solo) parts.push(windowName(ref.window));
       li.setAttribute('aria-label', LIST_TEXT.rowName(parts));
       return li;
     });
@@ -289,8 +320,9 @@ export function createListSurface(root: Document | ShadowRoot, flavor: Flavor): 
     panel.prepend(head);
   }
 
-  function showWindow(w: number): void {
-    if (w === shownWindow) return;
+  // fresh: the gone rows changed, so the shown window's rows are placed again.
+  function showWindow(w: number, fresh = false): void {
+    if (w === shownWindow && !fresh) return;
     cells[shownWindow]?.setAttribute('aria-selected', 'false');
     shownWindow = w;
     const cell = cells[w];
@@ -298,7 +330,8 @@ export function createListSurface(root: Document | ShadowRoot, flavor: Flavor): 
       cell.setAttribute('aria-selected', 'true');
       reveal(strip, cell, false);
     }
-    place(windows[w]?.rows.map((_, row) => ({ window: w, row })) ?? []);
+    const rows = windows[w]?.rows.map((_, row) => ({ window: w, row })) ?? [];
+    place(rows.filter((ref) => !hasRow(gone, ref)));
   }
 
   // An inert picture of the shown rows or empty state, outside layout over the live one: no ids, references,
@@ -377,15 +410,53 @@ export function createListSurface(root: Document | ShadowRoot, flavor: Flavor): 
 
   function removePanel(): void {
     reduced.removeEventListener('change', onReduce);
+    clearTimeout(noticeTimer);
     panel.remove();
     release(undefined);
+  }
+
+  function say(text: string): void {
+    notice.textContent = text;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      notice.textContent = '';
+    }, NOTICE_MS);
+  }
+
+  // Synchronous copy with no clipboard permission (probe p-clip): a temporary textarea inside the root, so page script
+  // never sees the text (C-HOLD-20); then focus and selection go back where they were, the page's own in hold.
+  function copyText(text: string): boolean {
+    const prior = root.activeElement ?? document.activeElement;
+    const field = prior instanceof HTMLInputElement || prior instanceof HTMLTextAreaElement ? prior : null;
+    const start = field?.selectionStart ?? null;
+    const end = field?.selectionEnd ?? null;
+    const direction = field?.selectionDirection ?? undefined;
+    const area = document.createElement('textarea');
+    area.style.cssText = 'position: absolute; top: -100px;';
+    area.value = text;
+    box.append(area);
+    area.focus({ preventScroll: true });
+    area.select();
+    let ok = false;
+    try {
+      // oxlint-disable-next-line typescript/no-deprecated -- the one copy route a page's Permissions-Policy cannot block.
+      ok = document.execCommand('copy');
+    } catch {
+      // refused: the caller says so
+    }
+    area.remove();
+    if (prior instanceof HTMLElement) prior.focus({ preventScroll: true });
+    if (field && start !== null && end !== null) field.setSelectionRange(start, end, direction);
+    return ok;
   }
 
   // The session paints only frames of the shown mode (05 4.5), so the frame's mode picks the branch.
   function update(frame: Frame): void {
     if (frame.mode === 'hold') {
+      const fresh = !sameRefs(gone, frame.gone);
+      gone = frame.gone;
       setShown(frame.visible);
-      showWindow(frame.window);
+      showWindow(frame.window, fresh);
       select(rowOf({ window: frame.window, row: frame.row }));
       return;
     }
@@ -397,15 +468,15 @@ export function createListSurface(root: Document | ShadowRoot, flavor: Flavor): 
     select(ref ? rowOf(ref) : null);
   }
 
-  ('body' in root ? root.body : root).append(panel);
+  box.append(panel);
 
   return {
     element: panel,
     field,
     list,
     start(s) {
-      windows = s.view.windows;
-      icons = windows.map((w) => w.rows.map((r) => r.icon));
+      ({ windows, closed } = s.view);
+      icons = [...windows, { rows: closed }].map((w) => w.rows.map((r) => r.icon));
       panel.classList.add(s.look.theme);
       if (s.look.textSize === 'large') panel.classList.add('large');
       reduceMotion = s.look.reduceMotion;
@@ -450,6 +521,16 @@ export function createListSurface(root: Document | ShadowRoot, flavor: Flavor): 
     rowAt(target) {
       const row = target instanceof Element ? target.closest('.row') : null;
       return row ? (refs.get(row) ?? null) : null;
+    },
+    pageRows() {
+      const row = list.firstElementChild;
+      const pad = parseFloat(getComputedStyle(list).paddingTop);
+      return row instanceof HTMLElement && row.offsetHeight > 0
+        ? Math.floor((list.clientHeight - 2 * pad) / row.offsetHeight)
+        : 1;
+    },
+    copy(text) {
+      if (text === null || !copyText(text)) say(LIST_TEXT.notCopied);
     },
     // Waits for a started fade, else removes at once.
     close() {

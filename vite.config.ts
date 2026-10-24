@@ -61,7 +61,7 @@ export default defineConfig({
     env: {
       builtin: true,
     },
-    ignorePatterns: ['dist', 'release', 'node_modules'],
+    ignorePatterns: ['dist', 'dist-timing', 'release', 'node_modules'],
     rules: {
       'constructor-super': 'error',
       'for-direction': 'error',
@@ -313,7 +313,7 @@ export default defineConfig({
     singleQuote: true,
     printWidth: 120,
     sortPackageJson: false,
-    ignorePatterns: ['dist', 'release', 'package-lock.json', 'docs/design', '.lilo'],
+    ignorePatterns: ['dist', 'dist-timing', 'release', 'package-lock.json', 'docs/design', '.lilo'],
   },
   // lazyPlugins skips the plugins while vp check, lint and fmt read this config; under exactOptionalPropertyTypes
   // its undefined return needs a fallback.

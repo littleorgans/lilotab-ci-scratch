@@ -1,6 +1,7 @@
 // Core entry (03-components 4.2): init and step for the worker shell, and every module the worker, hosts and pages
 // compose. Pure: no browser, DOM, timers, clock or randomness (03 3.1).
 
+export * from './badge.ts';
 export * from './host-input/index.ts';
 export * from './interaction/index.ts';
 export * from './keymap/index.ts';

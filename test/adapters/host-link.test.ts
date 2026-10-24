@@ -11,6 +11,7 @@ import {
   collect,
   extensionUrl,
   installFakeChrome,
+  noClosed,
   popupUrl,
   settle,
   type FakeBrowser,
@@ -30,7 +31,7 @@ function launch(host: 'overlay' | 'popup') {
   const { ingress, stepped } = collect();
   const hostLink = createHostLink('overlay.js');
   hostLink.onEvent(ingress);
-  registerEntry(ingress, () => createTabs().liveFacts());
+  registerEntry(ingress, () => createTabs().liveFacts(), noClosed);
   if (host === 'overlay') hostLink.mountOverlay(A, 11, START);
   else hostLink.openPopup(A, 11, 1, START);
   return { hostLink, stepped };

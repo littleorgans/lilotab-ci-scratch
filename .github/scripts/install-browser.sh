@@ -2,7 +2,7 @@
 # Puts one browser of the browser matrix on a GitHub hosted Ubuntu or Windows runner through its vendor's channel and
 # writes `exe` (empty for the harness's pinned Chrome for Testing) and `version` to $GITHUB_OUTPUT, or `skip` with the
 # reason when the browser cannot run here. Runs from the repository root after `just install`.
-# Usage: install-browser.sh <cft-pinned|cft-148|chrome|edge|brave|opera|vivaldi>
+# Usage: install-browser.sh <cft-pinned|cft-148|chrome|edge|brave|opera>
 set -uo pipefail
 browser=$1
 out=${GITHUB_OUTPUT:-/dev/stdout}
@@ -24,7 +24,7 @@ first() {
   [[ -n $found ]] && echo "$found"
 }
 
-# <name> <key url> <repository after the options> <package>: the vendor's signed apt repository, then its package.
+# <name> <key url> <repository after the options> <package>...: the vendor's signed apt repository, then its packages.
 apt_vendor() {
   local keyring=/usr/share/keyrings/$1.gpg key
   key=$(mktemp)
@@ -36,7 +36,7 @@ apt_vendor() {
   fi
   echo "deb [arch=amd64 signed-by=$keyring] $3" | sudo tee "/etc/apt/sources.list.d/$1.list" >/dev/null &&
     sudo apt-get update -qq &&
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$4"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${@:4}"
 }
 
 choco_vendor() {
@@ -58,14 +58,11 @@ case "$RUNNER_OS-$browser" in
     exe=$(first /usr/bin/brave-browser)
     ;;
   Linux-opera)
+    # Opera reads the GNOME desktop background setting at startup, and GLib aborts it with SIGTRAP when that schema is
+    # missing, as on the runner image; installing opera-stable does not pull them in.
     apt_vendor opera https://deb.opera.com/archive.key 'https://deb.opera.com/opera-stable/ stable non-free' \
-      opera-stable || skip 'Opera apt install failed'
+      opera-stable gsettings-desktop-schemas || skip 'Opera apt install failed'
     exe=$(first /usr/bin/opera)
-    ;;
-  Linux-vivaldi)
-    apt_vendor vivaldi https://repo.vivaldi.com/archive/linux_signing_key.pub \
-      'https://repo.vivaldi.com/archive/deb/ stable main' vivaldi-stable || skip 'Vivaldi apt install failed'
-    exe=$(first /usr/bin/vivaldi-stable)
     ;;
   Windows-chrome) exe=$(first "$programs/Google/Chrome/Application/chrome.exe") ;;
   Windows-edge) exe=$(first "$programs (x86)/Microsoft/Edge/Application/msedge.exe" "$programs/Microsoft/Edge/Application/msedge.exe") ;;
@@ -77,10 +74,6 @@ case "$RUNNER_OS-$browser" in
     # Opera keeps its browser binary in a version folder beside a top level launcher; Puppeteer must start the browser.
     choco_vendor opera || skip 'Opera choco install failed'
     exe=$(first "$programs"/Opera/*/opera.exe "$local_data"/Programs/Opera/*/opera.exe)
-    ;;
-  Windows-vivaldi)
-    choco_vendor vivaldi || skip 'Vivaldi choco install failed'
-    exe=$(first "$programs/Vivaldi/Application/vivaldi.exe" "$local_data/Vivaldi/Application/vivaldi.exe")
     ;;
   *) skip "no install route for $browser on $RUNNER_OS" ;;
 esac

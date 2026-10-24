@@ -5,17 +5,22 @@
 
 import { describe, it } from 'vite-plus/test';
 import {
+  CLOSED,
   LIVE,
   activated,
   activity,
   check,
   clearData,
+  close,
   enter,
   esc,
   focus,
+  host,
+  jump,
   latch,
   leave,
   move,
+  page,
   pick,
   ping,
   press,
@@ -23,6 +28,7 @@ import {
   ready,
   release,
   removed,
+  searchKey,
   settingsChanged,
   status,
   stepKey,
@@ -41,6 +47,9 @@ const OPEN = [press(0), ready(10), release(20)];
 // Search latched at 60 on the hold cursor, its 5 min idle due at 300060.
 const SEARCH = [...HOLD, latch(60)];
 const ALL = { quickScope: 'all' } as const;
+// Include recently closed tabs On, the closed tab Omega read at a toolbar click; its row is { window: 2, row: 0 }.
+const CLOSED_ON = { closedTabs: 'on' } as const;
+const OMEGA = [toolbar(0, { closed: CLOSED }), ready(10), query(20, 'omega')];
 
 describe('TB-01 interaction.holdGesture', () => {
   it.each<Row>([
@@ -138,6 +147,27 @@ describe('TB-01 interaction.holdGesture', () => {
       events: [...HOLD, clearData(60), release(70)],
       expect: { state: 'idle', exit: 'commit', activate: switchTo(13) },
     },
+    // Window 1 Recent rows: 11, 13, 12, 14; the cursor starts on 13.
+    {
+      name: 'T-74 C-SRCH-25 C-HOLD-27: the close key closes the cursor tab and moves to the next row',
+      events: [...HOLD, close(60)],
+      expect: { state: 'holding', shown: 12, closed: 13 },
+    },
+    {
+      name: 'T-74 C-HOLD-14: Up then skips the gone row',
+      events: [...HOLD, close(60), move(70, -1)],
+      expect: { state: 'holding', shown: 11 },
+    },
+    {
+      name: 'T-74 C-SRCH-25: on the last row the cursor moves to the previous one',
+      events: [...HOLD, move(60, 1), move(70, 1), close(80)],
+      expect: { state: 'holding', shown: 12, closed: 14 },
+    },
+    {
+      name: 'T-76 C-SRCH-25: the close key on the current tab does nothing',
+      events: [...HOLD, move(60, -1), close(70)],
+      expect: { state: 'holding', shown: 11, closed: null },
+    },
   ])('$name', check);
 
   // A quick tap at hold delay 0. The dwell is due at the press, so it expires before the ready host's
@@ -187,6 +217,12 @@ describe('TB-01 interaction.holdGesture', () => {
       settings: LIST,
       events: [...OPEN, pick(30, 22)],
       expect: { state: 'idle', exit: 'commit', activate: switchTo(22, true) },
+    },
+    {
+      name: 'T-59 C-HOLD-14: an open list stale pick after close switches nothing before tabRemoved',
+      settings: LIST,
+      events: [...OPEN, move(30, 1), close(40), pick(50, 13)],
+      expect: { state: 'idle', exit: 'commit' },
     },
     {
       name: 'T-29 C-TAP-11: Esc cancels the open list',
@@ -371,9 +407,24 @@ describe('TB-02 interaction.hostChoice', () => {
       expect: { state: 'idle', exit: 'commit', activate: switchTo(13) },
     },
     {
-      name: 'T-55 T-61 C-POP-09: a toolbar click opens search',
+      name: 'T-55 T-61 C-POP-09: a toolbar click opens search in the popup, even on a web page',
       events: [toolbar(0), ready(10)],
-      expect: { state: 'search' },
+      expect: { state: 'search', host: 'popup' },
+    },
+    {
+      name: 'T-79 T-61 C-KEY-12: the Search tabs command on a web page opens search in the overlay',
+      events: [searchKey(0), ready(10)],
+      expect: { state: 'search', host: 'overlay' },
+    },
+    {
+      name: 'T-79 T-61 C-KEY-12 C-POP-01: the Search tabs command on a browser page opens search in the popup',
+      events: [searchKey(0, { url: 'chrome://newtab/' }), ready(10)],
+      expect: { state: 'search', host: 'popup' },
+    },
+    {
+      name: 'T-79 C-KEY-12: a Search tabs press during a hold cancels it and opens search',
+      events: [...HOLD, searchKey(60)],
+      expect: { state: 'overlayPending', exit: 'cancel', host: 'overlay' },
     },
     {
       name: 'T-62 C-POP-09: a toolbar popup that fails cancels',
@@ -484,6 +535,55 @@ describe('TB-03 interaction.search', () => {
       settings: LIST,
       events: [...OPEN, latch(30), leave(40)],
       expect: { state: 'holding.open' },
+    },
+    // The empty query lists 11, 21, 13, 12, 22, 14, 23; the latch highlights 13, the third.
+    {
+      name: 'T-75 C-SRCH-25: the close key ranks again without the gone row and keeps the highlight index',
+      events: [...SEARCH, close(70)],
+      expect: { state: 'search', shown: 12, closed: 13 },
+    },
+    {
+      name: 'T-59 C-HOLD-14: a search stale pick after close switches nothing before tabRemoved',
+      events: [...SEARCH, close(70), pick(80, 13)],
+      expect: { state: 'idle', exit: 'commit' },
+    },
+    {
+      name: 'T-77 T-75 C-SRCH-23: End highlights the last result; closing it highlights the new last result',
+      events: [...SEARCH, jump(70, 'last'), close(80)],
+      expect: { state: 'search', shown: 14, closed: 23 },
+    },
+    {
+      name: 'T-77 C-SRCH-24: Page Down stops at the last result',
+      events: [...SEARCH, page(70, 1, 5)],
+      expect: { state: 'search', shown: 23 },
+    },
+    {
+      name: 'T-77 C-SRCH-24: Page Up stops at the first result',
+      events: [...SEARCH, page(70, -1, 5)],
+      expect: { state: 'search', shown: 11 },
+    },
+    {
+      name: 'T-77 C-SRCH-22: with no results Home only restarts the 5 min due',
+      events: [...SEARCH, query(70, 'zzz'), jump(100_000, 'first'), tick(300_070)],
+      expect: { state: 'search' },
+    },
+    {
+      name: 'T-78 C-SRCH-28: Enter on a recently closed row reopens it and switches nothing',
+      settings: CLOSED_ON,
+      events: [...OMEGA, enter(30)],
+      expect: { state: 'idle', exit: 'commit', restored: 's1' },
+    },
+    {
+      name: 'T-78 C-SRCH-28: a click on a recently closed row reopens it and switches nothing',
+      settings: CLOSED_ON,
+      events: [...OMEGA, host(30, { kind: 'pick', row: { window: 2, row: 0 } })],
+      expect: { state: 'idle', exit: 'commit', restored: 's1' },
+    },
+    {
+      name: 'T-76 C-SRCH-25: the close key on a recently closed row does nothing',
+      settings: CLOSED_ON,
+      events: [...OMEGA, close(30)],
+      expect: { state: 'search', closed: null, restored: null },
     },
   ])('$name', check);
 });

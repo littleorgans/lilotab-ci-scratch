@@ -4,7 +4,7 @@
 import { beforeEach, expect, test } from 'vite-plus/test';
 import { registerEntry } from '../../src/worker/adapters/entry/index.ts';
 import { createTabs } from '../../src/worker/adapters/tabs/index.ts';
-import { collect, installFakeChrome, settle, tab, win, type FakeBrowser } from './fake-chrome.ts';
+import { collect, installFakeChrome, noClosed, settle, tab, win, type FakeBrowser } from './fake-chrome.ts';
 
 let browser: FakeBrowser;
 beforeEach(() => {
@@ -42,7 +42,7 @@ test.each<{ name: string; act: (b: FakeBrowser) => void; steps: object[] }>([
 ])('AC-07 tabs.privateGuard: $name', async ({ act, steps }) => {
   const { ingress, stepped } = collect();
   createTabs().onEvent(ingress);
-  registerEntry(ingress, () => createTabs().liveFacts());
+  registerEntry(ingress, () => createTabs().liveFacts(), noClosed);
   act(browser);
   await settle();
   expect(stepped).toMatchObject(steps);

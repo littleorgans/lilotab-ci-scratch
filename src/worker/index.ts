@@ -5,10 +5,12 @@ import { PREP_BUDGET_MS, init, step, type Effect, type Model } from '../core/ind
 // The host link injects this file with scripting.executeScript({ files }); importing it here makes CRXJS bundle it as
 // one classic self contained file, which needs no web accessible resource (C-SEC-05).
 import overlayFile from '../hosts/overlay/index.ts?script&iife';
+import { createBadge } from './adapters/badge/index.ts';
 import { clock, createTimers, settleBy, type Settled } from './adapters/clock/index.ts';
 import { registerEntry } from './adapters/entry/index.ts';
 import { createHostLink } from './adapters/host-link/index.ts';
 import { createIcons, deliverIcons } from './adapters/icons/index.ts';
+import { recentlyClosed, restore } from './adapters/sessions/index.ts';
 import { createSaver, registerClear, restrictLocal, sessionStore, settingsStore } from './adapters/storage/index.ts';
 import { createTabs } from './adapters/tabs/index.ts';
 import { fault, report, reportCode } from './diagnostics.ts';
@@ -20,9 +22,11 @@ const boot = crypto.randomUUID(); // new per evaluation; no ':' or '|' (core typ
 let model: Model | null = null;
 
 const tabs = createTabs();
+const liveFacts = () => tabs.liveFacts();
 const hostLink = createHostLink(overlayFile);
 const icons = createIcons();
 const saver = createSaver(sessionStore);
+const badge = createBadge(liveFacts);
 
 // Effects in list order, each initiated and never awaited (03 4.1).
 function perform(effects: readonly Effect[]): void {
@@ -63,8 +67,17 @@ function initiate(e: Effect): void {
     case 'activate':
       tabs.activate(e.op, e.target, e.focusWindow);
       break;
+    case 'closeTab':
+      tabs.remove(e.tabId);
+      break;
+    case 'restoreTab':
+      restore(e.sessionId);
+      break;
     case 'checkpoint':
       saver.checkpoint(e.envelope, e.reply);
+      break;
+    case 'showBadge':
+      badge.show(e.on);
       break;
     case 'saveSettings': // a failed write back changes nothing at run time; the next boot migrates again (06 4.3)
       settingsStore.save(e.settings).catch(() => {
@@ -121,10 +134,16 @@ const timers = createTimers(ingress);
 
 // ---- top level listeners: MV3 wakes the worker for an event only if its listener exists at first evaluation
 
-const liveFacts = () => tabs.liveFacts();
-registerEntry(ingress, liveFacts);
+// Recently closed tabs only while Include recently closed tabs is On (C-SRCH-27); the adapter reads none without
+// permission (C-SET-29). A search that wakes the worker waits for the stored setting, within its preparation budget
+// (C-SW-01); a switch press never waits on the gate for this read, so on wake it carries none.
+registerEntry(ingress, liveFacts, async (entry) => {
+  if (entry === 'search') await gate;
+  return model?.settings.closedTabs === 'on' ? recentlyClosed() : [];
+});
 tabs.onEvent(ingress);
 hostLink.onEvent(ingress);
+badge.onEvent();
 settingsStore.onChanged(ingress);
 registerClear(ingress, saver, liveFacts);
 restrictLocal();

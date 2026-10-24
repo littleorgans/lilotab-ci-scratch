@@ -1,8 +1,9 @@
 // AC-14 to AC-25: overlay host, list view and icons (07-tests 2.2).
 import { SWITCH_COMMAND } from '../../src/worker/names.ts';
-import { pause, until } from './support.mjs';
+import { grantSessions, pause, releaseSessions, until } from './support.mjs';
 import { HELD } from './chrome.mjs';
-import { state, active } from './behavior.mjs';
+import { state, active, thrown } from './behavior.mjs';
+import { withVerifier } from './fixtures.mjs';
 import { near } from './look.mjs';
 import { pageScenarios } from './pages.mjs';
 import { lifecycleScenarios } from './lifecycle.mjs';
@@ -93,9 +94,7 @@ async function withShortcut(c, shortcut, fn) {
   try {
     return await fn();
   } finally {
-    await c.workerEval(
-      '(()=>{chrome.commands.getAll=__h1.originalCommands;delete __h1.originalCommands;return true})()',
-    );
+    await c.restoreBrowserApis();
   }
 }
 
@@ -129,6 +128,8 @@ function rowDetails() {
       icon: icon?.localName === 'img' ? { src: icon.src, width: icon.naturalWidth } : null,
       pin: pin ? rect(pin).x : null,
       sound: sound ? rect(sound).x : null,
+      closedMark: !!row.querySelector('svg.closed'),
+      selected: row.getAttribute('aria-selected') === 'true',
     };
   });
 }
@@ -148,6 +149,8 @@ function iconColours() {
 // What a page hit test meets at the panel's centre, ignoring pointer events and inertness: the painted top.
 async function topAtCentre(c, h) {
   const panel = await state(c, h);
+  // A list already gone has no centre to test; its state is the result, the trace and page log say why it went.
+  if (!panel.rect) return { panel: { connected: panel.connected, shown: panel.shown }, inPanel: false };
   const x = Math.round(panel.rect.x + panel.rect.width / 2),
     y = Math.round(panel.rect.y + panel.rect.height / 2);
   const hit = await h.s.send('DOM.getNodeForLocation', { x, y, ignorePointerEventsNone: true });
@@ -162,6 +165,9 @@ async function topAtCentre(c, h) {
 }
 const DIALOG = `(()=>{const d=document.createElement('dialog');d.id='h1-dialog';d.textContent='Page dialog';d.style.cssText='width:80vw;height:80vh';document.body.append(d);d.showModal();return d.open})()`;
 const FULLSCREEN = `document.querySelector('main').requestFullscreen().then(()=>document.fullscreenElement?.localName)`;
+// What the page saw from the case's start: input, with whether it carried the held key, focus moves and top layer
+// changes.
+const PAGE_LOG = `(()=>{if(!window.__h1Layer)for(const type of ['pointermove','pointerdown','keydown','keyup','focus','blur','fullscreenchange','visibilitychange'])addEventListener(type,(e)=>window.__h1Layer.push({at:performance.now(),type,trusted:e.isTrusted,held:!!e.${HELD.flag},key:e.key??null,target:e.target.localName??e.target.nodeName??'window'}),true);window.__h1Layer=[];return true})()`;
 async function clearTopLayer(c) {
   await asPage(
     c,
@@ -349,6 +355,137 @@ export function contractScenarios(c, e, add) {
     },
   );
 
+  // Search by the held F over the page, or by the toolbar in the popup, then a query that leaves H1 Other highlighted.
+  const searchOther = async (flavor) => {
+    const h = flavor === 'popup' ? await c.open('popup', { via: 'toolbar' }) : await c.open('overlay');
+    if (flavor === 'overlay') {
+      await c.key(h, 'f', HELD.modifier);
+      await pause(110);
+    }
+    const all = await state(c, h);
+    await h.s.send('Input.insertText', { text: 'Other' });
+    const typed = await until(async () => {
+      const s = await state(c, h);
+      return s.selected?.title === 'H1 Other' && s.rows.length < all.rows.length && s;
+    }).catch(() => state(c, h));
+    return { h, all, typed };
+  };
+  add(
+    'AC-16-search-esc-clears',
+    'In overlay search, Esc with text empties the field and lists every tab again, focus stays in the field and the page sees no key; Esc again cancels and switches nothing (C-SRCH-14, C-KEY-06)',
+    async () => {
+      const { h, all, typed } = await searchOther('overlay');
+      await c.sourcePage.evaluate(() => (window.__h1Page = []));
+      await c.key(h, 'Escape');
+      const cleared = await until(async () => {
+        const s = await state(c, h);
+        return s.rows?.length === all.rows.length && s;
+      }).catch(() => state(c, h));
+      const page = await c.sourcePage.evaluate(() => window.__h1Page);
+      await c.key(h, 'Escape');
+      const after = await closed(c, h);
+      return {
+        pass:
+          all.search &&
+          typed.selected?.title === 'H1 Other' &&
+          cleared.connected &&
+          cleared.search &&
+          cleared.fieldFocused &&
+          cleared.fieldText === '' &&
+          cleared.rows.length === all.rows.length &&
+          page.length === 0 &&
+          !after.connected &&
+          (await active(c)).id === c.source.id,
+        measured: {
+          rows: { all: all.rows.length, typed: typed.rows?.length, cleared: cleared.rows?.length },
+          cleared: { connected: cleared.connected, fieldFocused: cleared.fieldFocused, fieldText: cleared.fieldText },
+          page,
+          after: { connected: after.connected },
+        },
+      };
+    },
+  );
+  add(
+    'AC-16-search-command-overlay',
+    'The Search tabs command over a web page opens the overlay in search with the field focused and the host editable; typed keys reach only the field, never the page or its focused input (C-KEY-12, C-SRCH-05)',
+    async () => {
+      const h = await c.open('overlay', { via: 'search' });
+      const opened = await state(c, h);
+      await c.sourcePage.evaluate(() => (window.__h1Page = []));
+      await c.type(h, 'Other');
+      const typed = await until(async () => {
+        const s = await state(c, h);
+        return s.selected?.title === 'H1 Other' && s;
+      }).catch(() => state(c, h));
+      const page = await c.sourcePage.evaluate(() => window.__h1Page),
+        input = await pageInput(c);
+      await c.cancel(h);
+      return {
+        pass:
+          opened.search &&
+          opened.fieldFocused &&
+          opened.hostEditable === 'plaintext-only' &&
+          typed.fieldText === 'Other' &&
+          typed.selected?.title === 'H1 Other' &&
+          page.length === 0 &&
+          input.value === 'unchanged' &&
+          (await active(c)).id === c.source.id,
+        measured: {
+          opened: { search: opened.search, fieldFocused: opened.fieldFocused, hostEditable: opened.hostEditable },
+          typed: { fieldText: typed.fieldText, selected: typed.selected?.title },
+          page,
+          input,
+        },
+      };
+    },
+  );
+  // The copy key's modifier, whatever the held key: Cmd on macOS, Ctrl elsewhere (C-SRCH-26).
+  const copyModifier = process.platform === 'darwin' ? 4 : 2;
+  for (const flavor of ['overlay', 'popup'])
+    add(
+      `AC-16-copy-${flavor}`,
+      `In ${flavor} search, Cmd+C (Ctrl+C off macOS) copies the highlighted address with no clipboard permission; the field keeps focus, text and caret, and the list stays; read back on a separate verifier origin (C-SRCH-26, probe p-clip)`,
+      () =>
+        withVerifier(c, async (verifier) => {
+          const sentinel = `lilotab-sentinel-${flavor}`;
+          const seeded = (await verifier.seed(sentinel)) === sentinel;
+          const { h, typed } = await searchOther(flavor);
+          await c.key(h, 'c', copyModifier);
+          await pause(60);
+          const after = await state(c, h);
+          const expected = (await c.workerEval(`chrome.tabs.get(${c.other.id})`)).url;
+          await c.cancel(h);
+          const clipboard = await verifier.read();
+          const clipboardWrite = await c.workerEval(`chrome.permissions.contains({permissions:['clipboardWrite']})`);
+          return {
+            pass:
+              seeded &&
+              typed.selected?.title === 'H1 Other' &&
+              clipboard === expected &&
+              after.connected &&
+              after.fieldFocused &&
+              after.fieldText === typed.fieldText &&
+              JSON.stringify(after.fieldSelection) === JSON.stringify(typed.fieldSelection) &&
+              after.notice === '' &&
+              !clipboardWrite,
+            measured: {
+              seeded,
+              copied: clipboard === expected,
+              sentinelKept: clipboard === sentinel,
+              typed: { selected: typed.selected?.title, fieldText: typed.fieldText, selection: typed.fieldSelection },
+              after: {
+                connected: after.connected,
+                fieldFocused: after.fieldFocused,
+                fieldText: after.fieldText,
+                selection: after.fieldSelection,
+                notice: after.notice,
+              },
+              clipboardWrite,
+            },
+          };
+        }),
+    );
+
   add(
     'AC-17-closed-root',
     'Page script, hooking attachShadow and DOM mutations before the press, finds no title, address or icon address of the search list (C-HOLD-20, C-ICON-02)',
@@ -415,41 +552,51 @@ export function contractScenarios(c, e, add) {
     });
   });
 
-  // AC-19: page top layer content before the press or while the list shows, cleared after the case.
-  const withTopLayer = async (before, fn) => {
+  // AC-19 (C-HOLD-18): page top layer content open before the press, so the list shows over it; cleared after the
+  // case. The press sends no held key down, so a page input without it infers release and opens the list (C-HOLD-12,
+  // T-68), and a blur then cancels it (C-HOLD-11, T-30); the page log records both. A thrown check records the host
+  // before the cleanup resets it.
+  const withTopLayer = async (layer, fn) => {
     try {
-      if (before) await asPage(c, before);
-      return await fn(await c.open('overlay'));
+      let entered;
+      await asPage(c, PAGE_LOG);
+      const h = await c.open('overlay', { beforePress: async () => (entered = await asPage(c, layer)) });
+      return await fn(entered, h);
+    } catch (err) {
+      const failed = await thrown(c, err);
+      failed.measured.page = await asPage(c, 'window.__h1Layer');
+      return failed;
     } finally {
       await c.reset();
       await clearTopLayer(c);
     }
   };
-  for (const [id, expected, before, during] of [
+  for (const [id, expected, layer, present] of [
     [
       'AC-19-above-dialog',
       'With a page modal dialog open at the press, the list paints topmost at its centre (C-HOLD-18)',
       DIALOG,
+      `!!document.querySelector('#h1-dialog')?.open`,
     ],
     [
       'AC-19-above-fullscreen',
-      'A page element entering fullscreen while the list shows leaves the list topmost at its centre (C-HOLD-18)',
-      null,
+      'With a page element fullscreen at the press, the list paints topmost at its centre (C-HOLD-18)',
       FULLSCREEN,
+      `document.fullscreenElement?.localName ?? null`,
     ],
   ]) {
-    const check = () =>
-      withTopLayer(before, async (h) => {
-        const entered = during ? await asPage(c, during) : null;
+    add(id, expected, () =>
+      withTopLayer(layer, async (entered, h) => {
         await pause(150);
-        const top = await topAtCentre(c, h);
+        const top = await topAtCentre(c, h),
+          open = await asPage(c, present);
         return {
-          pass: top.inPanel && (!during || !!entered),
-          measured: { entered, top },
+          pass: !!entered && open === entered && top.inPanel,
+          measured: { entered, open, top, page: await asPage(c, 'window.__h1Layer') },
           artifacts: [await c.shot(h, `${id}.png`)],
         };
-      });
-    add(id, expected, check);
+      }),
+    );
   }
   // ---- List view
 
@@ -505,6 +652,54 @@ export function contractScenarios(c, e, add) {
     );
     return { pass: empty === 'No matching tabs' && (await rows(c, h)).length === 0, measured: { empty } };
   });
+  add(
+    'AC-22-rows-closed-restore',
+    'With Include recently closed tabs On and the sessions permission held, a query lists a tab closed meanwhile with the closed mark in the marker place and "Recently closed" in its name; Enter reopens it and closes the list (C-SRCH-27, C-SRCH-28)',
+    async () => {
+      const url = `${c.base}/?name=Gone`;
+      try {
+        const granted = await grantSessions(c);
+        const gone = await c.loaded(
+          (
+            await c.workerEval(
+              `chrome.tabs.create({windowId:${c.source.windowId},url:${JSON.stringify(url)},active:false})`,
+            )
+          ).id,
+        );
+        await c.workerEval(`chrome.tabs.remove(${gone.id})`);
+        const h = await c.open('overlay', { via: 'search', closedTabs: 'on' });
+        await h.s.send('Input.insertText', { text: 'Gone' });
+        const [row] = await until(async () => {
+          const shown = await rows(c, h);
+          return shown.length === 1 && shown;
+        }).catch(() => rows(c, h));
+        await c.key(h, 'Enter');
+        const after = await closed(c, h);
+        const reopened = await until(() =>
+          c.workerEval(`chrome.tabs.query({url:${JSON.stringify(url)}}).then(t=>t.length>0&&t.map(x=>x.id))`),
+        ).catch(() => []);
+        await c.workerEval(`chrome.tabs.remove(${JSON.stringify(reopened)})`).catch(() => {});
+        return {
+          pass:
+            granted &&
+            row?.closedMark &&
+            !row.marker &&
+            row.selected &&
+            row.label === 'H1 Gone, Recently closed' &&
+            !after.connected &&
+            reopened.length === 1,
+          measured: {
+            granted,
+            row: row && { label: row.label, closedMark: row.closedMark, marker: row.marker, selected: row.selected },
+            after: { connected: after.connected },
+            reopened: reopened.length,
+          },
+        };
+      } finally {
+        await releaseSessions(c);
+      }
+    },
+  );
   add(
     'AC-22-rows-icon-moves-nothing',
     'A row with its icon and rows with the placeholder keep the same title position and height (C-ICON-04)',

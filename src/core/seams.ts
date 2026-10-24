@@ -16,6 +16,7 @@ export type Sink = (prepare: (at: Millis) => CoreEvent | null | Promise<CoreEven
 export interface TabsAdapter {
   liveFacts(): Promise<LiveFacts>;
   activate(op: OpId, target: TabRef, focusWindow: boolean): void; // result arrives as `activated`
+  remove(tabId: TabId): void; // the close key (T-74, T-75); failure ignored, the later tabRemoved is the truth
   onEvent(sink: Sink): void; // registered synchronously at top level
 }
 

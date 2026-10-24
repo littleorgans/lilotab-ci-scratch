@@ -25,7 +25,7 @@ import {
   type TimerKind,
 } from '../../core/index.ts';
 
-type Press = Extract<CoreEvent, { kind: 'command' | 'toolbarClicked' }>;
+type Press = Extract<CoreEvent, { kind: 'command' | 'toolbarClicked' | 'searchCommand' }>;
 type CloseHost = Extract<Effect, { kind: 'closeHost' }>;
 type Pending = Omit<GestureRecord, 'outcome' | 'switched' | 'reason' | 'end'>;
 
@@ -76,11 +76,15 @@ const INPUT_CLASS: Readonly<Record<HostInput['kind'], InputClass>> = {
   pick: 'pointer',
   ping: 'other',
   activity: 'other',
+  jump: 'key',
+  page: 'key',
+  close: 'key',
   cancel: 'other',
 };
 
 const tenth = (ms: number): number => Math.round(ms * 10) / 10;
-const isPress = (e: CoreEvent): e is Press => e.kind === 'command' || e.kind === 'toolbarClicked';
+const isPress = (e: CoreEvent): e is Press =>
+  e.kind === 'command' || e.kind === 'toolbarClicked' || e.kind === 'searchCommand';
 const isPending = (i: Interaction) => i.state === 'overlayPending' || i.state === 'popupPending';
 
 function inputReason(prev: Interaction, input: HostInput, dwellExpired: boolean): EndReason {
@@ -107,6 +111,7 @@ function reasonOf(prev: Interaction, event: CoreEvent, dwellExpired: boolean): E
       return event.status === 'closed' ? 'hostClosed' : 'hostFailed';
     case 'command':
     case 'toolbarClicked':
+    case 'searchCommand':
       return 'newPress';
     case 'windowFocused':
       return 'focusLoss';
@@ -212,7 +217,7 @@ export function createGestureLog(origin: number, done: (record: TimingRecord) =>
       if (e.kind === 'render' && (e.frame.mode === 'search' || e.frame.visible)) r.shown ??= off(at);
     }
     if (cur?.id === prev.id) {
-      if (cur.state === 'holding' || cur.state === 'search') r.shown ??= off(at); // toolbar search shows at ready
+      if (cur.state === 'holding' || cur.state === 'search') r.shown ??= off(at); // a search entry shows at ready
       return;
     }
     const close = step.effects.find((e): e is CloseHost => e.kind === 'closeHost' && e.attempt === prev.attempt.id);

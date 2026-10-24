@@ -1,10 +1,13 @@
 // AC-26 to AC-29: extension pages (07-tests 2.2).
 import { SWITCH_COMMAND, WELCOME_PAGE } from '../../src/worker/names.ts';
-import { browserPage, pause, until } from './support.mjs';
+import { browserPage, grantSessions, pause, releaseSessions, until } from './support.mjs';
 
-// An extension page in a new tab, optionally over stored settings and a synthetic bound shortcut; closed after.
-async function onPage(c, file, fn, { settings, shortcut } = {}) {
+// An extension page in a new tab, optionally over stored settings, a synthetic bound shortcut and a held sessions
+// permission; closed after.
+async function onPage(c, file, fn, { settings, shortcut, sessions } = {}) {
   if (settings) await c.workerEval(`chrome.storage.local.set({settings:${JSON.stringify(settings)}})`);
+  // Granted before the page reads it, as Chrome's prompt would leave it; given back after.
+  if (sessions && !(await grantSessions(c))) throw new Error('Chrome did not grant the sessions permission');
   const page = await c.browser.newPage();
   try {
     if (shortcut !== undefined)
@@ -20,6 +23,7 @@ async function onPage(c, file, fn, { settings, shortcut } = {}) {
     return await fn(page);
   } finally {
     await page.close();
+    if (sessions) await releaseSessions(c);
   }
 }
 const optionsPage = (c) => c.manifest.options_ui.page;
@@ -39,19 +43,32 @@ export function pageScenarios(c, e, add) {
       const hint = document.querySelector('.hint');
       if (!hint || hint.firstElementChild?.hidden !== false) return null;
       const problem = document.querySelector('.problem');
+      const note = hint.parentElement.querySelector('.hint ~ .hint');
       return {
         shortcut: hint.textContent,
         problem: problem && !problem.hidden ? problem.textContent : null,
+        note: note && !note.hidden ? note.textContent : null,
         change: [...document.querySelectorAll('button')].some(
           (b) => b.textContent === 'Change shortcut' && !b.disabled,
         ),
         usage: [...document.querySelectorAll('.usage li')].map((li) => li.textContent),
       };
     });
+  // The bound state's note names Opera and Vivaldi on macOS only (C-KEY-13).
+  const MAC_NOTE =
+    process.platform === 'darwin'
+      ? 'In Opera and Vivaldi, Command+E opens a browser feature. If the shortcut does nothing there, choose another one, such as Control+S, with Change shortcut.'
+      : null;
+  const TAKEN_NOTE =
+    'Your browser or another extension may already use the default. Choose a shortcut with Change shortcut.';
   const SHORTCUT_STATES = [
-    ['bound', undefined, (s) => s.shortcut.startsWith(c.shortcutText) && s.problem === null],
-    ['none', '', (s) => s.shortcut.startsWith('No shortcut set') && s.problem === null],
-    ['no-modifier', 'F5', (s) => s.shortcut.startsWith('F5') && s.problem === 'This shortcut needs Cmd, Ctrl or Alt'],
+    ['bound', undefined, (s) => s.shortcut.startsWith(c.shortcutText) && s.problem === null && s.note === MAC_NOTE],
+    ['none', '', (s) => s.shortcut.startsWith('No shortcut set') && s.problem === null && s.note === TAKEN_NOTE],
+    [
+      'no-modifier',
+      'F5',
+      (s) => s.shortcut.startsWith('F5') && s.problem === 'This shortcut needs Cmd, Ctrl or Alt' && s.note === null,
+    ],
   ];
   for (const [where, file] of [
     ['settings', () => optionsPage(c)],
@@ -61,7 +78,7 @@ export function pageScenarios(c, e, add) {
       if (where === 'welcome' && name === 'no-modifier') continue; // same shared block and usage branch as below
       add(
         `AC-26-shortcut-${where}-${name}`,
-        `The ${where} page shows the ${name} shortcut state with Change shortcut${where === 'welcome' ? ', and usage lines only for a bound shortcut' : ''} (C-SET-01, C-KEY-09, C-KEY-10, C-KEY-11)`,
+        `The ${where} page shows the ${name} shortcut state with Change shortcut${where === 'welcome' ? ', and usage lines only for a bound shortcut' : ''} (C-SET-01, C-KEY-09, C-KEY-10, C-KEY-11, C-KEY-13)`,
         () =>
           onPage(
             c,
@@ -75,7 +92,9 @@ export function pageScenarios(c, e, add) {
           ),
       );
     }
-  // The binding as installed, before any harness substitute: a clash with a browser shortcut leaves it unset.
+  // The binding as installed, before any harness substitute: a clash with a browser shortcut leaves it unset. Chromium
+  // never auto assigns a suggested key that is a browser accelerator, so this fails where a browser keeps the default
+  // (Opera on macOS keeps Command+E); the pages then show the C-KEY-09 note.
   add('AC-26-shortcut-default', 'The switch command installs with its suggested shortcut set (C-KEY-01)', () => ({
     pass: !!c.installedShortcut,
     measured: { installed: c.installedShortcut, simulated: c.e.metadata.shortcutSimulated ?? null },
@@ -102,6 +121,8 @@ export function pageScenarios(c, e, add) {
     holdDelayMs: '50',
     tabOrder: 'recent',
     listSurface: 'overlay',
+    closedTabs: 'off',
+    tabCountBadge: 'off',
     theme: 'dark',
     textSize: 'default',
     reduceMotion: 'system',
@@ -116,6 +137,13 @@ export function pageScenarios(c, e, add) {
         (f) => document.getElementById(f.getAttribute('aria-labelledby'))?.textContent,
       ),
       status: [...document.querySelectorAll('.status')].map((s) => s.textContent).filter(Boolean),
+      failedUnder: [...document.querySelectorAll('.group > .status')]
+        .filter((s) => s.textContent)
+        .map((s) => s.closest('.group').id),
+      index: [...document.querySelectorAll('nav.index a')].map((a) => ({
+        label: a.textContent,
+        target: document.querySelector(a.getAttribute('href'))?.querySelector('h2')?.textContent ?? null,
+      })),
       notice: [...document.querySelectorAll('.notice')].filter((n) => !n.hidden).map((n) => n.textContent),
       buttons: Object.fromEntries([...document.querySelectorAll('button')].map((b) => [b.textContent, !b.disabled])),
     }));
@@ -152,7 +180,7 @@ export function pageScenarios(c, e, add) {
   );
   add(
     'AC-27-options-restore-defaults',
-    'Restore defaults restores every setting to its default, kept after a reload (C-SET-11)',
+    'Restore defaults restores every setting to its default, kept after a reload, and gives back the sessions permission (C-SET-11, C-SET-29)',
     () =>
       onPage(
         c,
@@ -163,17 +191,24 @@ export function pageScenarios(c, e, add) {
           await press(page, 'Restore defaults');
           await page.waitForFunction(() => document.querySelector('input[name="theme"]:checked')?.value === 'dark');
           await pause(100);
+          const removed = await until(() =>
+            page.evaluate(() =>
+              globalThis.chrome.permissions.contains({ permissions: ['sessions'] }).then((held) => !held),
+            ),
+          ).catch(() => false);
           await page.reload();
           await loaded(page);
           const after = await controls(page);
           return {
             pass:
               Object.entries(DEFAULTS).every(([k, v]) => before.checked[k] !== v) &&
-              Object.entries(DEFAULTS).every(([k, v]) => after.checked[k] === v),
-            measured: { before, after },
+              Object.entries(DEFAULTS).every(([k, v]) => after.checked[k] === v) &&
+              removed,
+            measured: { before, after, removed },
           };
         },
         {
+          sessions: true,
           settings: {
             version: 1,
             quickTap: 'list',
@@ -181,6 +216,8 @@ export function pageScenarios(c, e, add) {
             holdDelayMs: 200,
             tabOrder: 'window',
             listSurface: 'popup',
+            closedTabs: 'on',
+            tabCountBadge: 'on',
             theme: 'light',
             textSize: 'large',
             reduceMotion: 'always',
@@ -190,7 +227,7 @@ export function pageScenarios(c, e, add) {
   );
   add(
     'AC-27-options-save-failed',
-    'A rejected save restores the control and says "Could not save the setting. Try again." (C-SET-18)',
+    'A rejected save restores the control and says "Could not save the setting. Try again." under the group whose save failed (C-SET-18)',
     () =>
       onPage(
         c,
@@ -207,7 +244,10 @@ export function pageScenarios(c, e, add) {
             return x.status.length > 0 && x.checked.theme === 'dark' && x;
           }).catch(() => controls(page));
           return {
-            pass: after.checked.theme === 'dark' && after.status.includes('Could not save the setting. Try again.'),
+            pass:
+              after.checked.theme === 'dark' &&
+              after.status.includes('Could not save the setting. Try again.') &&
+              after.failedUnder.join() === 'appearance',
             measured: after,
           };
         },
@@ -216,25 +256,43 @@ export function pageScenarios(c, e, add) {
   );
   add(
     'AC-27-options-settings-offered',
-    'The page offers exactly the contract settings: no strip, pinned or search setting (C-SET-15, C-SET-16, C-WIN-13)',
+    'The page offers exactly the contract settings: no strip or pinned setting, one search setting; the side index lists the eight groups in order, each naming its group (C-SET-15, C-SET-16, C-WIN-13, C-SET-26)',
     () =>
       onPage(
         c,
         optionsPage(c),
         async (page) => {
           await loaded(page);
-          const { labels } = await controls(page);
+          const { labels, index } = await controls(page);
           const contract = [
             'Quick tap',
             'Quick tap switches within',
             'Hold delay',
             'Tab order',
-            'List surface',
+            'Show the list',
+            'Include recently closed tabs',
+            'Tab count badge',
             'Theme',
             'Text size',
             'Reduce motion',
           ];
-          return { pass: sorted(labels) === sorted(contract), measured: { labels } };
+          const groups = [
+            'Shortcuts',
+            'Quick tap',
+            'Tab list',
+            'Search',
+            'Toolbar icon',
+            'Appearance',
+            'Privacy and data',
+            'About',
+          ];
+          return {
+            pass:
+              sorted(labels) === sorted(contract) &&
+              index.map((i) => i.label).join('|') === groups.join('|') &&
+              index.every((i) => i.target === i.label),
+            measured: { labels, index },
+          };
         },
         { settings: { version: 1 } },
       ),
@@ -262,7 +320,7 @@ export function pageScenarios(c, e, add) {
           await (await opened.page())?.close();
           return {
             pass:
-              locked.disabled.length === 8 &&
+              locked.disabled.length === 10 &&
               locked.disabled.every(Boolean) &&
               !locked.buttons['Restore defaults'] &&
               locked.notice.join() ===
