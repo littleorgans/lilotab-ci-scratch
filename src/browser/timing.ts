@@ -42,7 +42,7 @@ export interface AttemptTimes {
 
 export interface GestureRecord {
   epoch: number; // the press, ms since 1970
-  entry: 'shortcut' | 'toolbar';
+  entry: 'shortcut' | 'search'; // search: the toolbar icon or the Search tabs command; 'toolbar' in old logs
   holdDelayMs: number;
   quickTap: 'flip' | 'list';
   page: PageClass;
@@ -54,7 +54,7 @@ export interface GestureRecord {
   prepared: number | null; // the press's preparation settled
   stepped: number; // the press stepped: host chosen
   attempts: AttemptTimes[]; // [0] the chosen host; [1] the popup after a declined or failed overlay
-  dwellDue: number | null; // no dwell with Open tab list or the toolbar
+  dwellDue: number | null; // no dwell with Open tab list or a search entry
   dwell: number | null; // the worker expired the dwell
   shown: number | null; // the worker sent the visible list
   input: { at: number; kind: InputClass; input: HostInput['kind']; inferred: boolean } | null; // first host input

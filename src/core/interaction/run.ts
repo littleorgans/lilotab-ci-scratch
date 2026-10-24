@@ -3,8 +3,8 @@
 import type { Frame, StartView } from '../protocol/index.ts';
 import { rank } from '../ranking/index.ts';
 import { project, record, sameEnvelope, type Recents } from '../recents/index.ts';
-import { candidates, iconKeys, listView } from '../snapshot/index.ts';
-import { diagnostic, sameRow, type Cursor, type Millis, type RequestId, type RowRef } from '../types.ts';
+import { candidates, copyText, iconKeys, listView, rowOf } from '../snapshot/index.ts';
+import { diagnostic, hasRow, sameRow, type Cursor, type Millis, type RequestId, type RowRef } from '../types.ts';
 import { HOLD_IDLE_MS, SEARCH_IDLE_MS, type Effect, type Interaction, type Model, type TimerKind } from './types.ts';
 
 // Mutable only inside one step; step returns its final values.
@@ -49,9 +49,18 @@ export function cancelTimer(run: Run, i: Interaction, timer: TimerKind): Interac
   return { ...i, due: { ...i.due, [timer]: null } };
 }
 
+export const isGone = (i: Pick<Interaction, 'gone'>, ref: RowRef): boolean => hasRow(i.gone, ref);
+
+// copy is the highlighted row's, and none while the hold list is hidden: a quick tap puts no address in the page
+// (C-SRCH-26, C-HOLD-20).
 export function frameOf(i: Interaction, visible: boolean): Frame {
-  if (i.search) return { mode: 'search', ...i.search };
-  return { mode: 'hold', visible, open: i.open, window: i.cursor.window, row: i.cursor.row };
+  if (i.search) {
+    const target = i.search.results[i.search.highlight];
+    return { mode: 'search', ...i.search, copy: target ? copyText(i.snapshot, target) : null };
+  }
+  const { cursor } = i;
+  const copy = visible ? copyText(i.snapshot, cursor) : null;
+  return { mode: 'hold', visible, open: i.open, window: cursor.window, row: cursor.row, gone: i.gone, copy };
 }
 
 export const startView = (i: Interaction): StartView => ({
@@ -79,9 +88,22 @@ export function loadIcons(run: Run, i: Interaction): void {
 
 export const wrap = (n: number, delta: number, length: number): number => (((n + delta) % length) + length) % length;
 
-// Search over every listed row, highlighting the given row when it is a result (T-18, T-31, T-55, C-SRCH-08).
-export function searchOf(i: Pick<Interaction, 'snapshot'>, query: string, highlight: Cursor | null) {
-  const results = rank(query, candidates(i.snapshot));
+// The first of at + delta, at + 2 delta, ... around a ring of length that passes ok; at itself when none does.
+export function seek(at: number, delta: number, length: number, ok: (n: number) => boolean): number {
+  for (let k = 1; k <= length; k++) {
+    const n = wrap(at, delta * k, length);
+    if (ok(n)) return n;
+  }
+  return at;
+}
+
+// Search over every listed row not gone, highlighting the given row when it is a result (T-18, T-31, T-55, T-75,
+// C-SRCH-08).
+export function searchOf(i: Pick<Interaction, 'snapshot' | 'gone'>, query: string, highlight: Cursor | null) {
+  const results = rank(
+    query,
+    candidates(i.snapshot).filter((c) => !isGone(i, c.ref)),
+  );
   return { query, results, highlight: Math.max(0, highlight ? results.findIndex((r) => sameRow(r, highlight)) : 0) };
 }
 
@@ -100,11 +122,17 @@ export function cancel(run: Run, i: Interaction): void {
 }
 
 // T-47: the source tab switches nothing. T-59: closed or moved meanwhile, nothing switches. T-48: activate and record.
+// T-78: a recently closed row reopens, with no activation and no recents write.
 export function commit(run: Run, i: Interaction, target: RowRef): void {
   close(run, i, 'commit');
-  const w = i.snapshot.windows[target.window];
-  const row = w?.rows[target.row];
-  if (!w || !row || row.tabId === i.source.tabId) return;
+  if (isGone(i, target)) return;
+  const named = rowOf(i.snapshot, target);
+  if (named?.closed) {
+    emit(run, { kind: 'restoreTab', sessionId: named.row.sessionId });
+    return;
+  }
+  if (!named || named.row.tabId === i.source.tabId) return;
+  const { window: w, row } = named;
   if (run.model.recents.tabs.get(row.tabId)?.windowId !== w.windowId) return;
   const op = nextId(run);
   const tab = { tabId: row.tabId, windowId: w.windowId };

@@ -24,10 +24,18 @@ const OTHER: RowRef = { window: 0, row: 1 };
 
 const send = (input: HostInput): SessionInput => ({ kind: 'send', input });
 const frame = (f: Frame): SessionInput => ({ kind: 'message', raw: { t: 'frame', frame: f } });
-const startMessage = (start: StartView) => ({ kind: 'message', raw: { t: 'start', start } }) as const;
+const startMessage = (start: StartView) => ({ kind: 'message', raw: { t: 'start', start, wake: null } }) as const;
 
-const hold = (row: number, open = false): Frame => ({ mode: 'hold', visible: true, open, window: 0, row });
-const search = (results: RowRef[]): Frame => ({ mode: 'search', query: 'q', results, highlight: 0 });
+const hold = (row: number, open = false): Extract<Frame, { mode: 'hold' }> => ({
+  mode: 'hold',
+  visible: true,
+  open,
+  window: 0,
+  row,
+  gone: [],
+  copy: null,
+});
+const search = (results: RowRef[]): Frame => ({ mode: 'search', query: 'q', results, highlight: 0, copy: null });
 
 const RELEASE: HostInput = { kind: 'release', inferred: false };
 const ENTER: HostInput = { kind: 'enter' };
@@ -208,9 +216,10 @@ function run(start: StartView, inputs: SessionInput[]) {
 }
 
 // Key and pointer facts through hostInputStep, resumes included, as the host runs them within one DOM event.
-function sense(state: HostInputState, facts: KeyFacts) {
+function sense(state: HostInputState, facts: KeyFacts, owned = false, fieldValue: string | null = null) {
   const keyCode = facts.type === 'keydown' || facts.type === 'keyup' ? 1 : null; // any non IME key code
-  let result = hostInputStep(state, { kind: 'sensed', facts, keyCode, fieldValue: null, owned: false });
+  const sensed = { kind: 'sensed', facts, keyCode, fieldValue, fieldSelected: false, pageRows: 8, owned } as const;
+  let result = hostInputStep(state, sensed);
   const effects: HostEffect[] = [...result.effects];
   while (result.resume) {
     result = hostInputStep(result.state, result.resume);
@@ -219,10 +228,13 @@ function sense(state: HostInputState, facts: KeyFacts) {
   return { state: result.state, effects };
 }
 
-const started = (start: StartView) => hostInputStep(initialHostInputState(), startMessage(start)).state;
+const started = (start: StartView) => hostInputStep(initialHostInputState(true), startMessage(start)).state;
+const paint = (state: HostInputState, f: Frame) => hostInputStep(state, frame(f)).state;
 
 const SWALLOW: HostEffect = { kind: 'consume', preventDefault: true, stopImmediatePropagation: true };
 const MISSED: HostInput = { kind: 'release', inferred: true };
+const HELD_PRESS = pointer('pointerdown', { meta: true });
+const OUTSIDE_CANCEL: HostEffect[] = [{ kind: 'hide', fade: true }, post({ kind: 'cancel', cause: 'blur' })];
 
 describe('TB-12 hostSession.step', () => {
   it.each(rows)('$name', ({ start, before, input, effects, ending }) => {
@@ -251,6 +263,69 @@ describe('TB-12 hostSession.step', () => {
     },
   ])('$name', ({ facts, effects }) => {
     expect(sense(started(LIST), facts).effects).toEqual(effects);
+  });
+
+  it.each([
+    {
+      name: 'C-HOLD-11 K-15 T-30: hold, a held press outside the shown list cancels with a fade, not swallowed',
+      owned: false,
+      effects: OUTSIDE_CANCEL,
+    },
+    {
+      name: 'C-HOLD-22 K-08: hold, a held press inside the list is activity',
+      owned: true,
+      effects: [{ kind: 'consume', preventDefault: false, stopImmediatePropagation: true }, post({ kind: 'activity' })],
+    },
+  ])('$name', ({ owned, effects }) => {
+    expect(sense(started(startView()), HELD_PRESS, owned).effects).toEqual(effects);
+  });
+
+  it('C-HOLD-11 K-15 C-SRCH-20: a held outside press cancels after local search and return before any frame', () => {
+    const hidden = started(startView({ frame: { ...hold(0), visible: false } }));
+    const latched = sense(hidden, keyFacts('f', { meta: true }));
+    const released = sense(latched.state, keyFacts('f', { type: 'keyup', meta: true }));
+    const returned = sense(released.state, keyFacts('f', { meta: true }));
+    expect(sense(returned.state, HELD_PRESS).effects).toEqual(OUTSIDE_CANCEL);
+  });
+
+  it('C-SRCH-14 K-30: Esc with text empties the field, then sends query "" as the field would', () => {
+    const input = { kind: 'field', type: 'input', trusted: true, fieldValue: 'abc', inputComposing: false } as const;
+    const typed = hostInputStep(started(TOOLBAR), { ...input, owned: true }).state;
+    const esc = sense(typed, keyFacts('Escape'), true, 'abc');
+    expect(esc.effects).toEqual([SWALLOW, { kind: 'clearField' }, post({ kind: 'query', text: '' })]);
+    expect(esc.state.sensor.lastSent).toBe('');
+  });
+
+  it('K-18 C-SRCH-14: IME Esc with key code 229 stays with the field before compositionstart', () => {
+    const sensed = {
+      kind: 'sensed',
+      facts: keyFacts('Escape'),
+      keyCode: 229,
+      fieldValue: 'abc',
+      fieldSelected: false,
+      pageRows: 8,
+      owned: true,
+    } as const;
+    const esc = hostInputStep(started(TOOLBAR), sensed);
+    expect(esc.effects).toEqual([{ kind: 'consume', preventDefault: false, stopImmediatePropagation: true }]);
+    expect(esc.state.sensor.lastSent).toBe('');
+    expect(esc.resume).toBeNull();
+  });
+
+  const COPY = { title: 'Second', url: 'https://second.example/' };
+  it.each([
+    { name: 'Cmd+C copies the address', shift: false, copy: COPY, text: COPY.url },
+    {
+      name: 'Shift+Cmd+C copies the title and address',
+      shift: true,
+      copy: COPY,
+      text: 'Second\nhttps://second.example/',
+    },
+    { name: 'with no copy text the host says it could not copy', shift: false, copy: null, text: null },
+  ])('C-SRCH-26 K-34: search, the last painted frame decides: $name', ({ shift, copy, text }) => {
+    const painted = paint(started(TOOLBAR), { ...search([OTHER]), copy });
+    const pressed = sense(painted, keyFacts(shift ? 'C' : 'c', { meta: true, shift }), true, '');
+    expect(pressed.effects).toEqual([SWALLOW, { kind: 'copy', text }]);
   });
 
   it('K-28 C-KEY-06: open, the keyup of a swallowed Down is swallowed too', () => {

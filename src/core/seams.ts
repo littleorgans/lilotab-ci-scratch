@@ -16,11 +16,12 @@ export type Sink = (prepare: (at: Millis) => CoreEvent | null | Promise<CoreEven
 export interface TabsAdapter {
   liveFacts(): Promise<LiveFacts>;
   activate(op: OpId, target: TabRef, focusWindow: boolean): void; // result arrives as `activated`
+  remove(tabId: TabId): void; // the close key (T-74, T-75); failure ignored, the later tabRemoved is the truth
   onEvent(sink: Sink): void; // registered synchronously at top level
 }
 
 export interface HostLink {
-  mountOverlay(attempt: AttemptId, tabId: TabId, start: StartView): void;
+  mountOverlay(attempt: AttemptId, tabId: TabId, start: StartView, dwell: Millis | null): void;
   openPopup(attempt: AttemptId, tabId: TabId, windowId: WindowId, start: StartView): void;
   send(attempt: AttemptId, msg: WorkerToHost): void;
   close(attempt: AttemptId, outcome: 'commit' | 'cancel'): void; // retires the attempt whether or not it connected

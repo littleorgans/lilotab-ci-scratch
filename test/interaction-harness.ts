@@ -6,6 +6,7 @@ import { expect } from 'vite-plus/test';
 import {
   init,
   step,
+  type ClosedTab,
   type CoreEvent,
   type Effect,
   type HostInput,
@@ -23,6 +24,9 @@ import { CMD_E } from './host-fixtures.ts';
 // ---- fixture
 
 const T0 = 1_000; // the press time; every row's offsets count from it
+
+// Stored settings under every row: rows assume This window unless they set a scope (C-SET-03).
+export const STORED = { version: 1, quickScope: 'window' } as const;
 
 // Tab bar order per window; the first tab of each is active. 14 and 23 are never activated.
 const TABS: Record<WindowId, readonly [TabId, string][]> = {
@@ -74,7 +78,7 @@ export const LIVE = {
 
 function base(settings: Partial<Settings>, live: LiveFacts): Model {
   const listed = new Set(live.windows.flatMap((w) => w.tabs.map((t) => t.tabId)));
-  let model = init('boot', undefined, { version: 1, ...settings }, live).model;
+  let model = init('boot', undefined, { ...STORED, ...settings }, live).model;
   let at = 0;
   for (const [kind, id] of HISTORY) {
     const windowId = kind === 'focus' ? id : windowOfTab(id);
@@ -113,16 +117,18 @@ export const press =
     source: { tabId, windowId: windowOfTab(tabId), url: urlOf(tabId) },
     binding: CMD_E,
     live,
+    closed: [],
   });
-export const toolbar =
-  (at: number): Ev =>
-  ({ live }) => ({
-    kind: 'toolbarClicked',
-    at: T0 + at,
-    source: { tabId: 11, windowId: 1, url: urlOf(11) },
-    binding: CMD_E,
-    live,
-  });
+// One recently closed tab, read at a search entry press; with two listed windows its row is { window: 2, row: 0 }.
+export const CLOSED: readonly ClosedTab[] = [
+  { sessionId: 's1', title: 'Omega', url: 'https://omega.example/', iconKey: null },
+];
+const searchPress =
+  (kind: 'toolbarClicked' | 'searchCommand') =>
+  (at: number, { url = urlOf(11), closed = [] as readonly ClosedTab[] } = {}): Ev =>
+  ({ live }) => ({ kind, at: T0 + at, source: { tabId: 11, windowId: 1, url }, binding: CMD_E, live, closed });
+export const toolbar = searchPress('toolbarClicked');
+export const searchKey = searchPress('searchCommand'); // the Search tabs command (C-KEY-12)
 export const status =
   (at: number, s: HostStatus, n?: number): Ev =>
   (ctx) => ({ kind: 'hostStatus', at: T0 + at, attempt: attemptOf(ctx, n), status: s });
@@ -145,6 +151,9 @@ export const enter = (at: number) => host(at, { kind: 'enter' });
 export const ping = (at: number) => host(at, { kind: 'ping' });
 export const activity = (at: number) => host(at, { kind: 'activity' });
 export const esc = (at: number) => host(at, { kind: 'cancel', cause: 'key' });
+export const close = (at: number) => host(at, { kind: 'close' });
+export const jump = (at: number, to: 'first' | 'last') => host(at, { kind: 'jump', to });
+export const page = (at: number, delta: 1 | -1, rows: number) => host(at, { kind: 'page', delta, rows });
 export const pick =
   (at: number, tabId: TabId): Ev =>
   (ctx) =>
@@ -161,7 +170,7 @@ export const removed =
   () => ({ kind: 'tabRemoved', at: T0 + at, tabId, windowId: windowOfTab(tabId), windowClosing: false });
 export const settingsChanged =
   (at: number, settings: Partial<Settings>): Ev =>
-  () => ({ kind: 'settingsChanged', at: T0 + at, settings: { version: 1, ...settings } });
+  () => ({ kind: 'settingsChanged', at: T0 + at, settings: { ...STORED, ...settings } });
 export const clearData =
   (at: number): Ev =>
   ({ live }) => ({ kind: 'clearData', at: T0 + at, live, request: 1 });
@@ -297,6 +306,9 @@ export interface Outcome {
   exit: 'commit' | 'cancel' | null; // the exit the last event took
   activate: { tab: TabId; focusWindow: boolean } | null; // the switch it asked for
   shown?: TabId | undefined; // the highlighted tab of the latest visible frame
+  closed?: TabId | null; // the tab the last event closed with the close key
+  restored?: string | null; // the session the last event reopened (T-78)
+  host?: 'overlay' | 'popup' | undefined; // the live interaction's host attempt
 }
 
 export const switchTo = (tab: TabId, focusWindow = false) => ({ tab, focusWindow });
@@ -334,11 +346,16 @@ export function check(row: Row): void {
   const ended = endedIn(last);
   const close = last.effects.find((e) => e.kind === 'closeHost' && e.attempt === ended?.attempt.id);
   const act = last.effects.find((e) => e.kind === 'activate');
+  const closed = last.effects.find((e) => e.kind === 'closeTab');
+  const restored = last.effects.find((e) => e.kind === 'restoreTab');
   const outcome: Outcome = {
     state: stateOf(last.after.interaction),
     exit: close?.kind === 'closeHost' ? close.outcome : null,
     activate: act?.kind === 'activate' ? switchTo(act.target.tabId, act.focusWindow) : null,
     ...('shown' in row.expect ? { shown: shownOf(trace) } : {}),
+    ...('closed' in row.expect ? { closed: closed?.kind === 'closeTab' ? closed.tabId : null } : {}),
+    ...('restored' in row.expect ? { restored: restored?.kind === 'restoreTab' ? restored.sessionId : null } : {}),
+    ...('host' in row.expect ? { host: last.after.interaction?.attempt.host } : {}),
   };
   expect(outcome).toStrictEqual({ exit: null, activate: null, ...row.expect });
 }

@@ -1,4 +1,4 @@
-import { pause } from './support.mjs';
+import { pause, scrub } from './support.mjs';
 import { HELD } from './chrome.mjs';
 export const state = (c, h) =>
   c.inspect(h).catch((e) => {
@@ -11,6 +11,17 @@ export const probe = (c, h) =>
       return { closed: true, animations: [], events: [], intervals: [], activeSensors: [] };
     throw e;
   });
+// A check that threw, as a harness FAIL with the last host as the error left it; a check that cleans up records this
+// before its cleanup resets the host.
+export const thrown = async (c, err) => ({
+  pass: false,
+  harnessError: scrub(err.message),
+  measured: {
+    error: scrub(err.message),
+    lastHost: c.last ? await state(c, c.last) : null,
+    probe: c.last ? await probe(c, c.last) : null,
+  },
+});
 const intervals = (p) => (p.intervals ?? []).filter((t) => t.active && t.ms === 20000);
 export const active = (c, windowId = c.source.windowId) =>
   c.workerEval(

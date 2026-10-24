@@ -4,9 +4,12 @@ import { describe, expect, it } from 'vite-plus/test';
 import {
   DEFAULTS,
   buildSnapshot,
+  candidates,
+  copyText,
   listView,
   reconcile,
   rowAt,
+  type ClosedTab,
   type Cursor,
   type ListRow,
   type LiveFacts,
@@ -18,10 +21,16 @@ import {
 import { close, focus, history, live, tab, use, win, type Step } from './data-fixtures.ts';
 
 // A press as the worker makes it: reconcile with the press's live facts, then build (T-03).
-function press(r: Recents, facts: LiveFacts, settings: Partial<Settings> = {}, source?: TabRef): Snapshot {
+function press(
+  r: Recents,
+  facts: LiveFacts,
+  settings: Partial<Settings> = {},
+  source?: TabRef,
+  closed: readonly ClosedTab[] = [],
+): Snapshot {
   const w = facts.windows[0];
   const from = source ?? { tabId: w?.tabs.find((t) => t.active)?.tabId ?? -1, windowId: w?.windowId ?? -1 };
-  const s = buildSnapshot(reconcile(r, facts), facts, { ...DEFAULTS, ...settings }, from);
+  const s = buildSnapshot(reconcile(r, facts), facts, { ...DEFAULTS, ...settings }, from, closed);
   if (!s) throw new Error('no snapshot');
   return s;
 }
@@ -62,6 +71,7 @@ describe('TB-04 snapshot.build', () => {
       name: 'C-TAP-03 C-HOLD-04 This window: quick target and first highlight stay in the source window',
       r: H2,
       facts: L2,
+      settings: { quickScope: 'window' },
       expected: { quick: 11, initial: { windowId: 1, tabId: 11 } },
     },
     {
@@ -155,6 +165,36 @@ describe('TB-04 snapshot.build', () => {
     },
   ])('$name', ({ settings, stack }) => {
     expect(outline(press(H3, L3, settings, from2)).stack).toEqual(stack);
+  });
+
+  // Read at the press, most recent first; ranking finds them in the closed window after the listed ones.
+  const CLOSED: ClosedTab[] = [
+    { sessionId: 's9', title: 'Closed last', url: 'https://last.example/', iconKey: null },
+    { sessionId: 's8', title: 'Closed before', url: 'https://before.example/', iconKey: null },
+  ];
+  it.each<{ name: string; settings: Partial<Settings>; closed: object[] }>([
+    {
+      name: 'C-SRCH-27 recently closed tabs become candidates after both windows, never used, in closing order',
+      settings: { closedTabs: 'on' },
+      closed: [
+        { ref: { window: 2, row: 0 }, title: 'Closed last', useRank: null, windowRank: 2, barIndex: 0 },
+        { ref: { window: 2, row: 1 }, title: 'Closed before', useRank: null, windowRank: 2, barIndex: 1 },
+      ],
+    },
+    { name: 'C-SET-22 Off: no recently closed tabs', settings: { closedTabs: 'off' }, closed: [] },
+  ])('$name', ({ settings, closed }) => {
+    const s = press(H2, L2, settings, undefined, CLOSED);
+    expect(candidates(s).filter((c) => c.closed)).toMatchObject(closed);
+    expect(s.closed).toHaveLength(closed.length);
+  });
+
+  it('C-SRCH-27 C-SRCH-26 recently closed rows reach the host as rows, and copy as an open row does', () => {
+    const s = press(H2, L2, { closedTabs: 'on' }, undefined, CLOSED);
+    expect(listView(s).closed).toEqual([
+      { title: 'Closed last', site: 'last.example', pinned: false, audible: false, icon: null },
+      { title: 'Closed before', site: 'before.example', pinned: false, audible: false, icon: null },
+    ]);
+    expect(copyText(s, { window: 2, row: 1 })).toEqual({ title: 'Closed before', url: 'https://before.example/' });
   });
 
   // The rows hosts paint, through the one snapshot to host projection.
