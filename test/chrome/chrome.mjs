@@ -70,8 +70,7 @@ export class Chrome {
       pipe: true,
       defaultViewport: null,
       args: [
-        `--load-extension=${this.ext}`,
-        `--disable-extensions-except=${this.ext}`,
+        // Lets the pipe connection load the build (Extensions.loadUnpacked); branded Chrome ignores --load-extension.
         '--enable-unsafe-extension-debugging',
         '--no-sandbox',
         '--no-first-run',
@@ -147,6 +146,9 @@ export class Chrome {
     });
     this.manifest = JSON.parse(fs.readFileSync(path.join(this.ext, 'manifest.json')));
     this.stage = 'extension load';
+    // Installs the build after the watchers attach, so its welcome tab is observed. --disable-extensions-except would
+    // keep it disabled in branded Chrome; the fresh profile has no other unpacked extension.
+    await this.root.send('Extensions.loadUnpacked', { path: this.ext });
     const callbacks = await this.attachWorker();
     const inventory = [];
     const collect = (dir) => {

@@ -40,7 +40,7 @@ No current scenario uses the known failure marker.
 
 ## Harness boundaries
 
-Every browser launch, the lifecycle browser included, passes `--use-mock-keychain` and `--password-store=basic` and gets its own fresh profile under the run folder, so no run touches the OS keychain or a real profile.
+Every browser launch, the lifecycle browser included, passes `--use-mock-keychain` and `--password-store=basic` and gets its own fresh profile under the run folder, so no run touches the OS keychain or a real profile. The build loads over the pipe through CDP `Extensions.loadUnpacked`, since branded Google Chrome ignores `--load-extension`.
 
 The harness drives the worker running the manifest's service worker script, ignoring a browser's bundled extension workers. An initial window closes down to one tab first, since Brave keeps a window of several tabs open and then crashes when its last tab closes; one still open after 2 s stays, listed in `fixtures.json`. `Chrome.reset` closes earlier hosts before every scenario. `Chrome.open` owns popups before startup checks and requires a fresh worker ready. Fixtures provide 14 normal windows and 16 tabs, with a pinned Audio tab, a busy page, a PDF and iframe focus. Fixture setup closes every tab the harness did not open, such as the welcome tab. Extra tabs and temporary browser API substitutions are restored after their scenario.
 
