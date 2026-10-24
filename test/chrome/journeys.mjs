@@ -102,11 +102,16 @@ class Traffic {
   extensionPage(sid) {
     return [...this.contexts.values()].some((x) => x.sid === sid && x.isDefault && x.origin === this.origin);
   }
-  // The extension's own: the worker, its pages, and in a web page its isolated world or a request it initiated.
+  // The extension's own: the worker, its pages, and in a web page its isolated world or a request it initiated. A
+  // browser's own page (Opera's start page fetches its offers) is no web page, so its other origins are not.
   ownRequest(r) {
     if (!/^(https?|wss?|ftp):/i.test(r.url)) return false;
     if (r.kind === 'worker' || this.extensionPage(r.sid) || r.documentURL?.startsWith(this.origin)) return true;
-    return new URL(r.url).origin !== new URL(this.c.base).origin || JSON.stringify(r.initiator).includes(this.origin);
+    const webPage = /^https?:/i.test(r.documentURL ?? '');
+    return (
+      (webPage && new URL(r.url).origin !== new URL(this.c.base).origin) ||
+      JSON.stringify(r.initiator).includes(this.origin)
+    );
   }
   ownWrite(w) {
     if (w.kind === 'worker' || this.extensionPage(w.sid) || w.url?.startsWith(this.origin)) return true;

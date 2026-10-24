@@ -165,11 +165,18 @@ function sensed(s: HostInputState, e: KeySensor): HostInputResult {
   return classifySensed(s, e);
 }
 
+// A held press outside the shown list leaves it, as one in search or the open list does (K-08, K-15); the page still
+// sees the press.
+function outside(c: Classified, e: KeySensor, session: HostSession): Classified {
+  const leaving = e.facts.type === 'pointerdown' && c.input?.kind === 'activity' && !e.owned && session.visible;
+  return leaving ? { input: { kind: 'cancel', cause: 'blur' }, swallow: false } : c;
+}
+
 function classifySensed(s: HostInputState, e: KeySensor): HostInputResult {
   const { session } = s;
   if (!session || session.quiet) return done(still(s));
   const facts = { ...e.facts, composing: s.sensor.composing || e.facts.composing };
-  const classified = classify(facts, contextOf(session, s.binding));
+  const classified = outside(classify(facts, contextOf(session, s.binding)), e, session);
   // A release that opens the list here, a missed one included (K-03), is sent first; the same event then means what
   // it means in the open list, so a first unheld Down moves and is swallowed (T-68).
   if (classified.input?.kind === 'release' && session.quickTap === 'list' && !session.open) {

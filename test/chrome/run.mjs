@@ -34,6 +34,8 @@ if (fs.existsSync(out) && fs.readdirSync(out).length) {
 }
 const e = new Evidence(out);
 const c = new Chrome({ ext, cache: path.join(root, '.smoke/browsers'), chrome: option('--chrome') }, e);
+// Four times the slowest scenario on any matrix cell (AC-03-welcome-once, under 8 s).
+e.bound = { ms: 30000, answers: () => c.answers() };
 const scenarios = [];
 const add = (id, expected, fn) => scenarios.push({ id, expected, fn });
 lookScenarios(c, e, add);
@@ -89,6 +91,8 @@ try {
   } catch (err) {
     e.write('cleanup-error.txt', scrub(err.stack));
   }
+  // Shutdown reports what the browser left, whether or not it stopped answering.
+  e.bound = null;
   await e.scenario('shutdown', 'Owned Chrome and all processes using its unique disposable profile exit', () => ({
     pass: clean,
     measured: { clean, profile: c.profile },

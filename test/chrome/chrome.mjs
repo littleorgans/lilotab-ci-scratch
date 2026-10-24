@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import diagnostics from 'node:diagnostics_channel';
 import puppeteer from 'puppeteer-core';
 import { Browser, install } from '@puppeteer/browsers';
-import { pause, until, scrub } from './support.mjs';
+import { pause, until, scrub, within } from './support.mjs';
 import { fixtureServer, createFixtures } from './fixtures.mjs';
 import { installProbe, inspectPanel, readProbe } from './probe.mjs';
 import { SWITCH_COMMAND } from '../../src/worker/names.ts';
@@ -21,6 +22,10 @@ export const HELD = mac
 // key the Chromium browsers leave free.
 const SIMULATED_SHORTCUT = 'Ctrl+Shift+9';
 const probeSource = `(${installProbe.toString()})()`;
+// Opera's extension renderer, which also runs the worker, crashes when an action popup opens within a few hundred ms of
+// the last one closing (up to 250 ms on Windows); its worker target then stays listed and never answers. No toolbar
+// press or command comes sooner than this after a popup closes.
+const POPUP_SETTLE_MS = 1000;
 // Harness profile processes as `pid ppid command` on Windows, which has no pgrep or ps; PowerShell filters by the
 // profile path, read from the environment to avoid quoting it.
 const windowsProfileProcesses = (profile) =>
@@ -62,6 +67,22 @@ export class Chrome {
     this.server = await fixtureServer();
     this.base = `http://127.0.0.1:${this.server.address().port}`;
     this.profile = fs.mkdtempSync(path.join(this.e.out, 'profile-'));
+    // browser.log takes the browser's stderr and exit from spawn, so a browser that dies during launch still leaves
+    // its output, exit code and signal. The launch's first child process is the browser; its stdio exists once spawn
+    // returns.
+    const log = path.join(this.e.out, 'browser.log');
+    const capture = ({ process: child }) => {
+      queueMicrotask(() => {
+        diagnostics.unsubscribe('child_process', capture);
+        child.stderr?.on('data', (s) => {
+          fs.appendFileSync(log, scrub(s));
+        });
+        child.once('exit', (code, signal) => {
+          fs.appendFileSync(log, `browser exited: code ${code}, signal ${signal}\n`);
+        });
+      });
+    };
+    diagnostics.subscribe('child_process', capture);
     this.browser = await puppeteer.launch({
       executablePath: installed.executablePath,
       userDataDir: this.profile,
@@ -87,9 +108,6 @@ export class Chrome {
       ],
     });
     this.pid = this.browser.process().pid;
-    this.browser.process().stderr?.on('data', (s) => {
-      fs.appendFileSync(path.join(this.e.out, 'browser.log'), scrub(s));
-    });
     this.root = await this.browser.target().createCDPSession();
     this.pageBoots = [];
     const autoAttach = {
@@ -144,6 +162,9 @@ export class Chrome {
     await this.popupRoot.send('Target.setAutoAttach', {
       ...autoAttach,
       filter: [{ type: 'other' }, { exclude: true }],
+    });
+    this.browser.on('targetdestroyed', (t) => {
+      if (this.isPopup(t)) this.popupClosedAt = Date.now();
     });
     this.manifest = JSON.parse(fs.readFileSync(path.join(this.ext, 'manifest.json')));
     this.stage = 'extension load';
@@ -302,6 +323,7 @@ export class Chrome {
     return this.eval(this.worker, expression);
   }
   async command(tabId = this.source.id) {
+    await this.popupSettled();
     const r = await this.worker.send('Runtime.callFunctionOn', {
       objectId: this.commandListener,
       functionDeclaration:
@@ -341,8 +363,16 @@ export class Chrome {
     await until(() => page.evaluate(() => document.hasFocus()));
     return page;
   }
+  isPopup(t) {
+    return t.url().startsWith(this.extensionBase + 'src/hosts/popup/index.html#');
+  }
   popupTargets() {
-    return this.browser.targets().filter((t) => t.url().startsWith(this.extensionBase + 'src/hosts/popup/index.html#'));
+    return this.browser.targets().filter((t) => this.isPopup(t));
+  }
+  // Waits out POPUP_SETTLE_MS since a popup last closed, before anything that can open one.
+  async popupSettled() {
+    const wait = (this.popupClosedAt ?? -Infinity) + POPUP_SETTLE_MS - Date.now();
+    if (wait > 0) await pause(wait);
   }
   popupTarget() {
     return this.popupTargets()[0];
@@ -353,6 +383,7 @@ export class Chrome {
     const targets = await this.root.send('Target.getTargets', { filter: [{ type: 'tab' }, { exclude: true }] });
     const info = targets.targetInfos.find((t) => t.url === page.url());
     if (!info) throw new Error('Fixture CDP tab target absent');
+    await this.popupSettled();
     const wall = await this.workerEval('Date.now()');
     await this.root.send('Extensions.triggerAction', { id: this.extensionId, targetId: info.targetId });
     return { wall };
@@ -688,6 +719,10 @@ export class Chrome {
   workerMessages() {
     return this.workerEval('__h1.messages');
   }
+  // Whether the worker still evaluates, within the time any healthy evaluation takes.
+  answers() {
+    return within(5000, () => this.workerEval('true')).catch(() => false);
+  }
   // Every chrome.windows.update call with focused true since the worker attached; headless reports every window
   // focused, so a journey observes the request.
   focusRequests() {
@@ -712,7 +747,6 @@ export class Chrome {
     } catch {
       // ESRCH: the browser process is gone.
     }
-    await pause(100);
     let remaining = [],
       processCheckError = null;
     // pgrep matches the profile path in each command line, so output scales with harness processes, never the whole
@@ -725,15 +759,22 @@ export class Chrome {
         throw err;
       }
     };
-    try {
-      if (process.platform === 'win32') remaining = windowsProfileProcesses(this.profile);
-      else {
-        const pids = run('pgrep', ['-f', this.profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')]).trim();
-        if (pids)
-          remaining = run('ps', ['-o', 'pid=,ppid=,command=', '-p', pids.split('\n').join(',')])
+    const profileProcesses = () => {
+      if (process.platform === 'win32') return windowsProfileProcesses(this.profile);
+      const pids = run('pgrep', ['-f', this.profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')]).trim();
+      return pids
+        ? run('ps', ['-o', 'pid=,ppid=,command=', '-p', pids.split('\n').join(',')])
             .split('\n')
-            .filter(Boolean);
-      }
+            .filter(Boolean)
+        : [];
+    };
+    // Children can outlive the browser by a moment (Opera's crash reporter on Windows), so a remainder gets 3 s.
+    try {
+      const end = Date.now() + 3000;
+      do {
+        await pause(100);
+        remaining = profileProcesses();
+      } while (remaining.length && Date.now() < end);
     } catch (err) {
       processCheckError = scrub(err.message);
     }

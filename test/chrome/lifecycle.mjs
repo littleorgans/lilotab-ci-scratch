@@ -18,9 +18,7 @@ class FreshInstall extends Chrome {
   }
   // Empty query toolbar search rows: recent first, then unused by window and tab bar order (C-SRCH-08).
   async searchOrder() {
-    const targets = await this.root.send('Target.getTargets', { filter: [{ type: 'tab' }, { exclude: true }] });
-    const tab = targets.targetInfos.find((t) => t.url === this.sourcePage.url());
-    await this.root.send('Extensions.triggerAction', { id: this.extensionId, targetId: tab.targetId });
+    await this.toolbar();
     const target = await until(() => this.popupTarget(), 4000);
     const session = await target.createCDPSession();
     const titles = await until(() =>
