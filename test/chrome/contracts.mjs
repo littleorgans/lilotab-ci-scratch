@@ -2,7 +2,7 @@
 import { SWITCH_COMMAND } from '../../src/worker/names.ts';
 import { pause, until } from './support.mjs';
 import { HELD } from './chrome.mjs';
-import { state, active } from './behavior.mjs';
+import { state, active, thrown } from './behavior.mjs';
 import { near } from './look.mjs';
 import { pageScenarios } from './pages.mjs';
 import { lifecycleScenarios } from './lifecycle.mjs';
@@ -148,6 +148,8 @@ function iconColours() {
 // What a page hit test meets at the panel's centre, ignoring pointer events and inertness: the painted top.
 async function topAtCentre(c, h) {
   const panel = await state(c, h);
+  // A list already gone has no centre to test; its state is the result, the trace and page log say why it went.
+  if (!panel.rect) return { panel: { connected: panel.connected, shown: panel.shown }, inPanel: false };
   const x = Math.round(panel.rect.x + panel.rect.width / 2),
     y = Math.round(panel.rect.y + panel.rect.height / 2);
   const hit = await h.s.send('DOM.getNodeForLocation', { x, y, ignorePointerEventsNone: true });
@@ -162,6 +164,9 @@ async function topAtCentre(c, h) {
 }
 const DIALOG = `(()=>{const d=document.createElement('dialog');d.id='h1-dialog';d.textContent='Page dialog';d.style.cssText='width:80vw;height:80vh';document.body.append(d);d.showModal();return d.open})()`;
 const FULLSCREEN = `document.querySelector('main').requestFullscreen().then(()=>document.fullscreenElement?.localName)`;
+// What the page saw from the case's start: input, with whether it carried the held key, focus moves and top layer
+// changes.
+const PAGE_LOG = `(()=>{if(!window.__h1Layer)for(const type of ['pointermove','pointerdown','keydown','keyup','focus','blur','fullscreenchange','visibilitychange'])addEventListener(type,(e)=>window.__h1Layer.push({at:performance.now(),type,trusted:e.isTrusted,held:!!e.${HELD.flag},key:e.key??null,target:e.target.localName??e.target.nodeName??'window'}),true);window.__h1Layer=[];return true})()`;
 async function clearTopLayer(c) {
   await asPage(
     c,
@@ -415,41 +420,51 @@ export function contractScenarios(c, e, add) {
     });
   });
 
-  // AC-19: page top layer content before the press or while the list shows, cleared after the case.
-  const withTopLayer = async (before, fn) => {
+  // AC-19 (C-HOLD-18): page top layer content open before the press, so the list shows over it; cleared after the
+  // case. The press sends no held key down, so a page input without it infers release and opens the list (C-HOLD-12,
+  // T-68), and a blur then cancels it (C-HOLD-11, T-30); the page log records both. A thrown check records the host
+  // before the cleanup resets it.
+  const withTopLayer = async (layer, fn) => {
     try {
-      if (before) await asPage(c, before);
-      return await fn(await c.open('overlay'));
+      let entered;
+      await asPage(c, PAGE_LOG);
+      const h = await c.open('overlay', { beforePress: async () => (entered = await asPage(c, layer)) });
+      return await fn(entered, h);
+    } catch (err) {
+      const failed = await thrown(c, err);
+      failed.measured.page = await asPage(c, 'window.__h1Layer');
+      return failed;
     } finally {
       await c.reset();
       await clearTopLayer(c);
     }
   };
-  for (const [id, expected, before, during] of [
+  for (const [id, expected, layer, present] of [
     [
       'AC-19-above-dialog',
       'With a page modal dialog open at the press, the list paints topmost at its centre (C-HOLD-18)',
       DIALOG,
+      `!!document.querySelector('#h1-dialog')?.open`,
     ],
     [
       'AC-19-above-fullscreen',
-      'A page element entering fullscreen while the list shows leaves the list topmost at its centre (C-HOLD-18)',
-      null,
+      'With a page element fullscreen at the press, the list paints topmost at its centre (C-HOLD-18)',
       FULLSCREEN,
+      `document.fullscreenElement?.localName ?? null`,
     ],
   ]) {
-    const check = () =>
-      withTopLayer(before, async (h) => {
-        const entered = during ? await asPage(c, during) : null;
+    add(id, expected, () =>
+      withTopLayer(layer, async (entered, h) => {
         await pause(150);
-        const top = await topAtCentre(c, h);
+        const top = await topAtCentre(c, h),
+          open = await asPage(c, present);
         return {
-          pass: top.inPanel && (!during || !!entered),
-          measured: { entered, top },
+          pass: !!entered && open === entered && top.inPanel,
+          measured: { entered, open, top, page: await asPage(c, 'window.__h1Layer') },
           artifacts: [await c.shot(h, `${id}.png`)],
         };
-      });
-    add(id, expected, check);
+      }),
+    );
   }
   // ---- List view
 

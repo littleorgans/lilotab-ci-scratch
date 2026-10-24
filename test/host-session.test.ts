@@ -26,7 +26,13 @@ const send = (input: HostInput): SessionInput => ({ kind: 'send', input });
 const frame = (f: Frame): SessionInput => ({ kind: 'message', raw: { t: 'frame', frame: f } });
 const startMessage = (start: StartView) => ({ kind: 'message', raw: { t: 'start', start } }) as const;
 
-const hold = (row: number, open = false): Frame => ({ mode: 'hold', visible: true, open, window: 0, row });
+const hold = (row: number, open = false): Extract<Frame, { mode: 'hold' }> => ({
+  mode: 'hold',
+  visible: true,
+  open,
+  window: 0,
+  row,
+});
 const search = (results: RowRef[]): Frame => ({ mode: 'search', query: 'q', results, highlight: 0 });
 
 const RELEASE: HostInput = { kind: 'release', inferred: false };
@@ -208,9 +214,9 @@ function run(start: StartView, inputs: SessionInput[]) {
 }
 
 // Key and pointer facts through hostInputStep, resumes included, as the host runs them within one DOM event.
-function sense(state: HostInputState, facts: KeyFacts) {
+function sense(state: HostInputState, facts: KeyFacts, owned = false) {
   const keyCode = facts.type === 'keydown' || facts.type === 'keyup' ? 1 : null; // any non IME key code
-  let result = hostInputStep(state, { kind: 'sensed', facts, keyCode, fieldValue: null, owned: false });
+  let result = hostInputStep(state, { kind: 'sensed', facts, keyCode, fieldValue: null, owned });
   const effects: HostEffect[] = [...result.effects];
   while (result.resume) {
     result = hostInputStep(result.state, result.resume);
@@ -223,6 +229,8 @@ const started = (start: StartView) => hostInputStep(initialHostInputState(), sta
 
 const SWALLOW: HostEffect = { kind: 'consume', preventDefault: true, stopImmediatePropagation: true };
 const MISSED: HostInput = { kind: 'release', inferred: true };
+const HELD_PRESS = pointer('pointerdown', { meta: true });
+const OUTSIDE_CANCEL: HostEffect[] = [{ kind: 'hide', fade: true }, post({ kind: 'cancel', cause: 'blur' })];
 
 describe('TB-12 hostSession.step', () => {
   it.each(rows)('$name', ({ start, before, input, effects, ending }) => {
@@ -251,6 +259,29 @@ describe('TB-12 hostSession.step', () => {
     },
   ])('$name', ({ facts, effects }) => {
     expect(sense(started(LIST), facts).effects).toEqual(effects);
+  });
+
+  it.each([
+    {
+      name: 'C-HOLD-11 K-15 T-30: hold, a held press outside the shown list cancels with a fade, not swallowed',
+      owned: false,
+      effects: OUTSIDE_CANCEL,
+    },
+    {
+      name: 'C-HOLD-22 K-08: hold, a held press inside the list is activity',
+      owned: true,
+      effects: [{ kind: 'consume', preventDefault: false, stopImmediatePropagation: true }, post({ kind: 'activity' })],
+    },
+  ])('$name', ({ owned, effects }) => {
+    expect(sense(started(startView()), HELD_PRESS, owned).effects).toEqual(effects);
+  });
+
+  it('C-HOLD-11 K-15 C-SRCH-20: a held outside press cancels after local search and return before any frame', () => {
+    const hidden = started(startView({ frame: { ...hold(0), visible: false } }));
+    const latched = sense(hidden, keyFacts('f', { meta: true }));
+    const released = sense(latched.state, keyFacts('f', { type: 'keyup', meta: true }));
+    const returned = sense(released.state, keyFacts('f', { meta: true }));
+    expect(sense(returned.state, HELD_PRESS).effects).toEqual(OUTSIDE_CANCEL);
   });
 
   it('K-28 C-KEY-06: open, the keyup of a swallowed Down is swallowed too', () => {
