@@ -24,7 +24,7 @@ first() {
   [[ -n $found ]] && echo "$found"
 }
 
-# <name> <key url> <repository after the options> <package>: the vendor's signed apt repository, then its package.
+# <name> <key url> <repository after the options> <package>...: the vendor's signed apt repository, then its packages.
 apt_vendor() {
   local keyring=/usr/share/keyrings/$1.gpg key
   key=$(mktemp)
@@ -36,7 +36,7 @@ apt_vendor() {
   fi
   echo "deb [arch=amd64 signed-by=$keyring] $3" | sudo tee "/etc/apt/sources.list.d/$1.list" >/dev/null &&
     sudo apt-get update -qq &&
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$4"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${@:4}"
 }
 
 choco_vendor() {
@@ -58,8 +58,10 @@ case "$RUNNER_OS-$browser" in
     exe=$(first /usr/bin/brave-browser)
     ;;
   Linux-opera)
+    # Opera reads the GNOME desktop background setting at startup, and GLib aborts it with SIGTRAP when that schema is
+    # missing, as on the runner image; installing opera-stable does not pull them in.
     apt_vendor opera https://deb.opera.com/archive.key 'https://deb.opera.com/opera-stable/ stable non-free' \
-      opera-stable || skip 'Opera apt install failed'
+      opera-stable gsettings-desktop-schemas || skip 'Opera apt install failed'
     exe=$(first /usr/bin/opera)
     ;;
   Linux-vivaldi)

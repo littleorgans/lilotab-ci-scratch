@@ -2,7 +2,7 @@
 import path from 'node:path';
 import { WELCOME_PAGE } from '../../src/worker/names.ts';
 import { Chrome } from './chrome.mjs';
-import { Evidence, pause, until } from './support.mjs';
+import { Evidence, pause, scrub, until } from './support.mjs';
 import { state, active } from './behavior.mjs';
 
 // Install, then an extension reload, in a second disposable browser with its own profile: the welcome tab counted
@@ -18,9 +18,7 @@ class FreshInstall extends Chrome {
   }
   // Empty query toolbar search rows: recent first, then unused by window and tab bar order (C-SRCH-08).
   async searchOrder() {
-    const targets = await this.root.send('Target.getTargets', { filter: [{ type: 'tab' }, { exclude: true }] });
-    const tab = targets.targetInfos.find((t) => t.url === this.sourcePage.url());
-    await this.root.send('Extensions.triggerAction', { id: this.extensionId, targetId: tab.targetId });
+    await this.toolbar();
     const target = await until(() => this.popupTarget(), 4000);
     const session = await target.createCDPSession();
     const titles = await until(() =>
@@ -43,13 +41,15 @@ function lifecycleOnce(c, e) {
         new Evidence(path.join(e.out, 'lifecycle')),
       );
       let seen, clean;
+      // Only AC-09 reads the toolbar search order; a failed read fails it alone.
+      const failed = (err) => ({ error: scrub(err.message) });
       try {
         await fresh.start();
         seen = { welcomeAtInstall: fresh.welcomeAtInstall, source: fresh.source.id };
         await fresh.focus(fresh.audio.id);
         await fresh.focus(fresh.other.id);
         await fresh.focus();
-        seen.before = await fresh.searchOrder();
+        seen.before = await fresh.searchOrder().catch(failed);
         const h = await fresh.open('overlay');
         seen.list = await state(fresh, h);
         const worker = (t) => t.type() === 'service_worker' && t.url().startsWith(fresh.extensionBase);
@@ -74,7 +74,7 @@ function lifecycleOnce(c, e) {
           .catch((err) => `gone: ${err.message.slice(0, 60)}`);
         await pause(700);
         seen.welcomeAfterReload = fresh.browser.targets().filter((t) => t.url().endsWith(WELCOME_PAGE)).length;
-        seen.after = await fresh.searchOrder();
+        seen.after = await fresh.searchOrder().catch(failed);
       } finally {
         clean = await fresh.stop();
       }
@@ -101,6 +101,7 @@ export function lifecycleScenarios(c, e, add) {
     "After an extension reload the recent order is empty and each window's active tab is seeded: the two never active tabs follow all 14 in tab bar order (C-DATA-03, C-REC-09)",
     async () => {
       const { before, after } = await lifecycle();
+      if (before.error || after.error) throw new Error(`Toolbar search order unread: ${before.error ?? after.error}`);
       // Audio and Other are the only tabs never active at the reload: unused, they follow every seeded tab in tab
       // bar order (Audio is pinned first), whereas before it Other, used last, came first.
       return {

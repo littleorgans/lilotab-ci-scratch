@@ -75,11 +75,19 @@ export function pageScenarios(c, e, add) {
           ),
       );
     }
-  // The binding as installed, before any harness substitute: a clash with a browser shortcut leaves it unset.
-  add('AC-26-shortcut-default', 'The switch command installs with its suggested shortcut set (C-KEY-01)', () => ({
-    pass: !!c.installedShortcut,
-    measured: { installed: c.installedShortcut, simulated: c.e.metadata.shortcutSimulated ?? null },
-  }));
+  // The binding as installed, before any harness substitute: a clash with a browser shortcut leaves it unset. Chromium
+  // never auto assigns a suggested key that is a browser accelerator, and Edge on Windows and Linux binds Ctrl+Shift+E
+  // to sidebar search; the owner ruled a per browser default there, not yet built.
+  const edgeClash = () => c.e.metadata.browser?.startsWith('Edg/') && process.platform !== 'darwin';
+  add(
+    'AC-26-shortcut-default',
+    () =>
+      `${edgeClash() ? 'KNOWN BUG on Edge, Windows and Linux (proposal; per browser default ruled, not yet built): Ctrl+Shift+E is an Edge accelerator, so Edge leaves it unassigned. ' : ''}The switch command installs with its suggested shortcut set (C-KEY-01)`,
+    () => ({
+      pass: !!c.installedShortcut,
+      measured: { installed: c.installedShortcut, simulated: c.e.metadata.shortcutSimulated ?? null },
+    }),
+  );
   add(
     'AC-26-shortcut-change',
     'Change shortcut opens chrome://extensions/shortcuts in a new tab (C-SET-17, C-SET-01)',

@@ -23,6 +23,18 @@ export async function until(fn, ms = 2500) {
     `Timed out after ${ms} ms; last observation: ${scrub(JSON.stringify(value))}; ${scrub(error?.message ?? '')}`,
   );
 }
+// Settles as `fn` does, or rejects once `ms` pass with an error marked `exceeded`; the work itself carries on unobserved.
+export function within(ms, fn, what = 'Work') {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(Object.assign(new Error(`${what} exceeded ${ms} ms`), { exceeded: ms }));
+    }, ms);
+  });
+  return Promise.race([fn(), late]).finally(() => {
+    clearTimeout(timer);
+  });
+}
 export class Evidence {
   constructor(out) {
     this.out = out;
@@ -40,13 +52,19 @@ export class Evidence {
     );
     return name;
   }
+  // While `bound` ({ ms, answers }) is set, a scenario past `ms` fails alone; once `answers` then resolves false, later
+  // scenarios record that without running, so the run still reaches its end.
   async scenario(id, expected, fn) {
-    const start = Date.now();
+    const start = Date.now(),
+      bound = this.bound;
     let observation;
     try {
-      observation = await fn();
+      if (bound && this.stalled)
+        observation = { pass: false, harnessError: `Not run: the browser stopped answering in ${this.stalled}` };
+      else observation = await (bound ? within(bound.ms, fn, 'Scenario') : fn());
     } catch (e) {
       observation = { pass: false, harnessError: scrub(e.message), trace: scrub(e.stack) };
+      if (e.exceeded && !(await bound.answers())) this.stalled = id;
     }
     // A known product bug (expected text starts `KNOWN BUG`) records KNOWN while it fails and FAIL once it passes, so
     // a fix forces the mark's removal; only FAIL fails the run.
