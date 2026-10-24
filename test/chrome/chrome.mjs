@@ -102,6 +102,7 @@ export class Chrome {
       parent.on('Target.attachedToTarget', async ({ sessionId, targetInfo, waitingForDebugger }) => {
         const session = this.root.connection().session(sessionId);
         if (!session) return;
+        const attachedAt = Date.now();
         try {
           if (targetInfo.type === 'tab') {
             watch(session);
@@ -114,19 +115,25 @@ export class Chrome {
           if (targetInfo.type === 'page' || targetInfo.type === 'other') {
             const defaults = this.popupDefaults ?? { freeze: [], osReduce: false, theme: 'dark' };
             const source = `${probeSource};__h1.freeze=${JSON.stringify(defaults.freeze)};`;
-            await this.notify(session, 'page');
-            await session.send('Page.enable');
-            await session.send('Runtime.enable');
-            await this.emulate(session, defaults.osReduce, defaults.theme);
-            await session.send('Page.addScriptToEvaluateOnNewDocument', { source });
-            const observed = await session.send('Runtime.evaluate', {
-              expression: `${source};({ready:document.readyState,panelAlreadyMounted:!!document.querySelector('.panel'),at:performance.now()})`,
-              returnByValue: true,
-            });
+            // A popup paused here spends the worker's 500 ms host deadline (C-POP-05), and a late one is refused and
+            // closes. So every command goes out at once, the session keeps their order, and the popup resumes after
+            // one round trip rather than one per command; `heldMs` records the pause.
+            const [, , , , , observed] = await Promise.all([
+              this.notify(session, 'page'),
+              session.send('Page.enable'),
+              session.send('Runtime.enable'),
+              this.emulate(session, defaults.osReduce, defaults.theme),
+              session.send('Page.addScriptToEvaluateOnNewDocument', { source }),
+              session.send('Runtime.evaluate', {
+                expression: `${source};({ready:document.readyState,panelAlreadyMounted:!!document.querySelector('.panel'),at:performance.now()})`,
+                returnByValue: true,
+              }),
+            ]);
             this.pageBoots.push({
               targetId: targetInfo.targetId,
               type: targetInfo.type,
               waitingForDebugger,
+              heldMs: Date.now() - attachedAt,
               ...observed.result.value,
             });
             this.instrumented.add(targetInfo.targetId);
@@ -252,9 +259,12 @@ export class Chrome {
       10000,
     );
     await this.workerEval(probeSource);
+    // The observer runs after the product's onConnect listener, which disconnects a refused port (05 4.3); adding a
+    // listener to that port throws into the event dispatch, a worker console entry JY-9 would count. It records the
+    // port in `closedPorts` instead.
     await this.workerEval(`(()=>{
-      const p=__h1;p.messages=[];
-      const observe=port=>{port.onMessage.addListener(m=>{if(m.t==='input'||m.t==='ready')p.messages.push({at:performance.now(),wall:Date.now(),t:m.t,input:m.input??null})});return port};
+      const p=__h1;p.messages=[];p.closedPorts=[];
+      const observe=port=>{try{port.onMessage.addListener(m=>{if(m.t==='input'||m.t==='ready')p.messages.push({at:performance.now(),wall:Date.now(),t:m.t,input:m.input??null})})}catch{p.closedPorts.push({wall:Date.now()})}return port};
       const connect=chrome.tabs.connect.bind(chrome.tabs);chrome.tabs.connect=(...args)=>observe(connect(...args));
       chrome.runtime.onConnect.addListener(observe);
       p.focusRequests=[];const update=chrome.windows.update.bind(chrome.windows);
@@ -628,10 +638,12 @@ export class Chrome {
           ),
         2000,
       ).catch(() => null);
-      if (!initialMedia || initialMedia.initial !== osReduce || initialMedia.panelAlreadyMounted)
+      if (!initialMedia || initialMedia.initial !== osReduce || initialMedia.panelAlreadyMounted) {
+        const closed = (await this.workerEval('__h1.closedPorts')).filter((x) => x.wall >= invocation.wall).length;
         throw new Error(
-          `Popup startup media was not observed with the requested value before renderer construction; observed ${JSON.stringify(initialMedia ?? null)}`,
+          `Popup startup media was not observed with the requested value before renderer construction; observed ${JSON.stringify(initialMedia ?? null)}; ports the worker closed since the press: ${closed}`,
         );
+      }
       await this.media(h, osReduce, theme);
       await this.own(h, `__h1.freeze=${JSON.stringify(freeze)}`);
       this.e.metadata.popupMode = 'Real toolbar popup via chrome.action.openPopup, normal worker handshake';

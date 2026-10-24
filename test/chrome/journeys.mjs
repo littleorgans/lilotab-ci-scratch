@@ -78,8 +78,8 @@ class Traffic {
     session.on('Log.entryAdded', ({ entry }) =>
       this.writes.push({ kind, sid, context: null, source: `log.${entry.source}`, text: entry.text, url: entry.url }),
     );
-    await session.send('Network.enable');
-    await session.send('Log.enable');
+    // Sent together, ahead of the commands the caller sends meanwhile, so a paused popup resumes sooner.
+    await Promise.all([session.send('Network.enable'), session.send('Log.enable')]);
     if (kind !== 'worker') return;
     session.on('Runtime.bindingCalled', ({ name, payload }) => {
       if (name === '__h1Storage') this.storage.push(JSON.parse(payload));
