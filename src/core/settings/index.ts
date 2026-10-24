@@ -11,6 +11,8 @@ export interface Settings {
   holdDelayMs: 0 | 50 | 100 | 200; // C-SET-04
   tabOrder: 'recent' | 'window'; // C-SET-05
   listSurface: 'overlay' | 'popup'; // C-SET-02
+  closedTabs: 'off' | 'on'; // C-SET-22
+  tabCountBadge: 'off' | 'on'; // C-SET-23
   theme: 'dark' | 'light' | 'system'; // C-SET-06
   textSize: 'default' | 'large'; // C-SET-09
   reduceMotion: 'system' | 'always' | 'never'; // C-SET-08
@@ -18,19 +20,34 @@ export interface Settings {
 
 export type SettingField = keyof Settings;
 
-// One table drives parsing, the options page controls and their section; key order is the page order (06 4.1).
+// The settings page groups, in page order (C-SET intro).
+export const GROUPS = [
+  'shortcuts',
+  'quickTap',
+  'tabList',
+  'search',
+  'toolbar',
+  'appearance',
+  'privacy',
+  'about',
+] as const;
+export type SettingGroup = (typeof GROUPS)[number];
+
+// One table drives parsing, the options page controls and their group; key order is the page order (06 4.1).
 export const SCHEMA: {
   readonly [K in SettingField]: {
     values: readonly Settings[K][];
     default: Settings[K];
-    section: 'switching' | 'appearance';
+    section: SettingGroup;
   };
 } = {
-  quickTap: { values: ['flip', 'list'], default: 'flip', section: 'switching' },
-  quickScope: { values: ['window', 'all'], default: 'window', section: 'switching' },
-  holdDelayMs: { values: [0, 50, 100, 200], default: 50, section: 'switching' },
-  tabOrder: { values: ['recent', 'window'], default: 'recent', section: 'switching' },
-  listSurface: { values: ['overlay', 'popup'], default: 'overlay', section: 'switching' },
+  quickTap: { values: ['flip', 'list'], default: 'flip', section: 'quickTap' },
+  quickScope: { values: ['window', 'all'], default: 'window', section: 'quickTap' },
+  holdDelayMs: { values: [0, 50, 100, 200], default: 50, section: 'quickTap' },
+  tabOrder: { values: ['recent', 'window'], default: 'recent', section: 'tabList' },
+  listSurface: { values: ['overlay', 'popup'], default: 'overlay', section: 'tabList' },
+  closedTabs: { values: ['off', 'on'], default: 'off', section: 'search' },
+  tabCountBadge: { values: ['off', 'on'], default: 'off', section: 'toolbar' },
   theme: { values: ['dark', 'light', 'system'], default: 'dark', section: 'appearance' },
   textSize: { values: ['default', 'large'], default: 'default', section: 'appearance' },
   reduceMotion: { values: ['system', 'always', 'never'], default: 'system', section: 'appearance' },

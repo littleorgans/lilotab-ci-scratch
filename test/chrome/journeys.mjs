@@ -78,8 +78,8 @@ class Traffic {
     session.on('Log.entryAdded', ({ entry }) =>
       this.writes.push({ kind, sid, context: null, source: `log.${entry.source}`, text: entry.text, url: entry.url }),
     );
-    await session.send('Network.enable');
-    await session.send('Log.enable');
+    // Sent together, ahead of the commands the caller sends meanwhile, so a paused popup resumes sooner.
+    await Promise.all([session.send('Network.enable'), session.send('Log.enable')]);
     if (kind !== 'worker') return;
     session.on('Runtime.bindingCalled', ({ name, payload }) => {
       if (name === '__h1Storage') this.storage.push(JSON.parse(payload));
@@ -102,11 +102,16 @@ class Traffic {
   extensionPage(sid) {
     return [...this.contexts.values()].some((x) => x.sid === sid && x.isDefault && x.origin === this.origin);
   }
-  // The extension's own: the worker, its pages, and in a web page its isolated world or a request it initiated.
+  // The extension's own: the worker, its pages, and in a web page its isolated world or a request it initiated. A
+  // browser's own page (Opera's start page fetches its offers) is no web page, so its other origins are not.
   ownRequest(r) {
     if (!/^(https?|wss?|ftp):/i.test(r.url)) return false;
     if (r.kind === 'worker' || this.extensionPage(r.sid) || r.documentURL?.startsWith(this.origin)) return true;
-    return new URL(r.url).origin !== new URL(this.c.base).origin || JSON.stringify(r.initiator).includes(this.origin);
+    const webPage = /^https?:/i.test(r.documentURL ?? '');
+    return (
+      (webPage && new URL(r.url).origin !== new URL(this.c.base).origin) ||
+      JSON.stringify(r.initiator).includes(this.origin)
+    );
   }
   ownWrite(w) {
     if (w.kind === 'worker' || this.extensionPage(w.sid) || w.url?.startsWith(this.origin)) return true;
@@ -397,17 +402,45 @@ export function journeyScenarios(c, e, add) {
   );
   add(
     'JY-5-toolbar-search-esc',
-    'C-SRCH-14, C-POP-04: Esc in toolbar search closes the popup and changes nothing',
+    'C-SRCH-14, C-POP-04: in toolbar search, Esc with text empties the field and the popup stays, listing every tab; Esc again closes the popup and changes nothing',
     async () => {
-      const h = await c.open('popup', { via: 'toolbar' });
+      const h = await c.open('popup', { via: 'toolbar' }),
+        opened = await state(c, h);
+      await h.s.send('Input.insertText', { text: 'Window7' });
+      const typed = await settle(
+        () => state(c, h),
+        (s) => s.rows?.length < opened.rows.length,
+      );
+      await c.key(h, 'Escape');
+      const cleared = await settle(
+        () => state(c, h),
+        (s) => s.rows?.length === opened.rows.length,
+      );
+      await pause(100);
+      const stayed = c.popupTargets().length === 1 && (await state(c, h)).connected;
       await c.key(h, 'Escape');
       const closed = await settle(() => c.popupTargets().length === 0, Boolean);
       await pause(100);
       const after = await active(c, c.source.windowId),
         focusRequests = (await c.focusRequests()).filter((r) => r.wall >= h.invokedAt);
       return {
-        pass: closed && after.id === c.source.id && focusRequests.length === 0,
-        measured: { closed, after, focusRequests },
+        pass:
+          typed.rows?.length < opened.rows.length &&
+          cleared.fieldText === '' &&
+          cleared.fieldFocused &&
+          cleared.rows?.length === opened.rows.length &&
+          stayed &&
+          closed &&
+          after.id === c.source.id &&
+          focusRequests.length === 0,
+        measured: {
+          rows: { opened: opened.rows?.length, typed: typed.rows?.length, cleared: cleared.rows?.length },
+          cleared: { fieldText: cleared.fieldText, fieldFocused: cleared.fieldFocused },
+          stayed,
+          closed,
+          after,
+          focusRequests,
+        },
       };
     },
   );

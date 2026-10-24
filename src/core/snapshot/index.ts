@@ -1,10 +1,19 @@
 // Frozen list for one interaction: rows, quick target, cursor and look (03-components 4.6, 04-state-machine 6).
 
-import { SITE_MAX, TITLE_MAX, fitText, type ListView, type Look } from '../protocol/index.ts';
+import {
+  SITE_MAX,
+  TITLE_MAX,
+  URL_MAX,
+  fitText,
+  type CopyText,
+  type ListRow,
+  type ListView,
+  type Look,
+} from '../protocol/index.ts';
 import type { Candidate } from '../ranking/index.ts';
 import { globalList, windowList, windowOrder, type Recents } from '../recents/index.ts';
 import type { Settings } from '../settings/index.ts';
-import type { Cursor, LiveFacts, LiveTab, TabId, TabRef, WindowId } from '../types.ts';
+import type { ClosedTab, Cursor, LiveFacts, LiveTab, RowRef, TabId, TabRef, WindowId } from '../types.ts';
 import { urlParts } from '../url.ts';
 
 export interface SnapRow {
@@ -30,6 +39,7 @@ export interface Snapshot {
   quick: Cursor | null; // where a quick tap goes; null = nothing to switch to (C-TAP-07)
   initial: Cursor; // list mode: the current tab (C-HOLD-24); else quick (C-HOLD-04), else the current tab (C-HOLD-05)
   stack: readonly Cursor[] | null; // Flip to last tab, All windows: every row by global recency, never used last; held steps walk it
+  closed: readonly ClosedTab[]; // most recent first; empty unless Include recently closed tabs is On (C-SRCH-27, C-SET-22)
 }
 
 export const lookOf = (s: Settings): Look => ({ theme: s.theme, reduceMotion: s.reduceMotion, textSize: s.textSize });
@@ -38,7 +48,13 @@ export const listedTabs = (live: LiveFacts): number => live.windows.reduce((n, w
 
 // Recents must already be reconciled with these live facts (T-03), so every listed tab is known.
 // null when the source tab is not in a listed window: a press from a window that is not normal does nothing.
-export function buildSnapshot(r: Recents, live: LiveFacts, settings: Settings, source: TabRef): Snapshot | null {
+export function buildSnapshot(
+  r: Recents,
+  live: LiveFacts,
+  settings: Settings,
+  source: TabRef,
+  closed: readonly ClosedTab[],
+): Snapshot | null {
   const byId = new Map(live.windows.map((w) => [w.windowId, w.tabs]));
   if (!byId.get(source.windowId)?.some((t) => t.tabId === source.tabId)) return null;
 
@@ -93,6 +109,7 @@ export function buildSnapshot(r: Recents, live: LiveFacts, settings: Settings, s
     quick,
     initial,
     stack: settings.quickTap === 'flip' && settings.quickScope === 'all' ? stackOf(windows) : null,
+    closed: settings.closedTabs === 'on' ? closed : [],
   };
 }
 
@@ -105,25 +122,51 @@ const stackOf = (windows: readonly SnapWindow[]): Cursor[] =>
 
 export const rowAt = (s: Snapshot, c: Cursor) => s.windows[c.window]?.rows[c.row];
 
-// The one snapshot to host projection: display text cut to the protocol limits, icons later as patches (C-ICON-04).
-export const listView = (s: Snapshot): ListView => ({
-  windows: s.windows.map((w) => ({
-    current: w.current,
-    rows: w.rows.map((row) => ({
-      title: fitText(row.title, TITLE_MAX),
-      site: fitText(urlParts(row.url).host, SITE_MAX),
-      pinned: row.pinned,
-      audible: row.audible,
-      icon: null,
-    })),
-  })),
+// What a row reference names: an open row in its window, a recently closed tab in the closed window after the listed
+// ones (window === windows.length), or nothing (03 4.6).
+export type NamedRow = { closed: false; window: SnapWindow; row: SnapRow } | { closed: true; row: ClosedTab };
+
+export function rowOf(s: Snapshot, ref: RowRef): NamedRow | null {
+  if (ref.window === s.windows.length) {
+    const tab = s.closed[ref.row];
+    return tab ? { closed: true, row: tab } : null;
+  }
+  const window = s.windows[ref.window];
+  const row = window?.rows[ref.row];
+  return window && row ? { closed: false, window, row } : null;
+}
+
+const listRow = (row: Pick<SnapRow, 'title' | 'url' | 'pinned' | 'audible'>): ListRow => ({
+  title: fitText(row.title, TITLE_MAX),
+  site: fitText(urlParts(row.url).host, SITE_MAX),
+  pinned: row.pinned,
+  audible: row.audible,
+  icon: null,
 });
 
-export const iconKeys = (s: Snapshot): (string | null)[][] => s.windows.map((w) => w.rows.map((row) => row.iconKey));
+// The one snapshot to host projection: display text cut to the protocol limits, icons later as patches (C-ICON-04).
+export const listView = (s: Snapshot): ListView => ({
+  windows: s.windows.map((w) => ({ current: w.current, rows: w.rows.map(listRow) })),
+  closed: s.closed.map((tab) => listRow({ ...tab, pinned: false, audible: false })),
+});
 
-// Ranking reads full titles and addresses, so a match beyond the display cut still ranks (C-SRCH-19).
-export const candidates = (s: Snapshot): Candidate[] =>
-  s.windows.flatMap((w, window) =>
+// The row's text for the host's copy keys, open or closed, its title cut as listView cuts it; null past URL_MAX
+// (C-SRCH-26).
+export function copyText(s: Snapshot, ref: RowRef): CopyText | null {
+  const row = rowOf(s, ref)?.row;
+  return row && row.url.length <= URL_MAX ? { title: fitText(row.title, TITLE_MAX), url: row.url } : null;
+}
+
+// Recently closed rows follow the listed windows, as the closed window (03 4.6).
+export const iconKeys = (s: Snapshot): (string | null)[][] => [
+  ...s.windows.map((w) => w.rows.map((row) => row.iconKey)),
+  s.closed.map((tab) => tab.iconKey),
+];
+
+// Ranking reads full titles and addresses, so a match beyond the display cut still ranks (C-SRCH-19). Recently closed
+// rows sit in the closed window after the listed ones, never used, in closing order (C-SRCH-27, 03 4.6).
+export const candidates = (s: Snapshot): Candidate[] => [
+  ...s.windows.flatMap((w, window) =>
     w.rows.map((row, i) => ({
       ref: { window, row: i },
       title: row.title,
@@ -131,5 +174,16 @@ export const candidates = (s: Snapshot): Candidate[] =>
       useRank: row.useRank,
       windowRank: window,
       barIndex: row.barIndex,
+      closed: false,
     })),
-  );
+  ),
+  ...s.closed.map((tab, i) => ({
+    ref: { window: s.windows.length, row: i },
+    title: tab.title,
+    url: tab.url,
+    useRank: null,
+    windowRank: s.windows.length,
+    barIndex: i,
+    closed: true,
+  })),
+];

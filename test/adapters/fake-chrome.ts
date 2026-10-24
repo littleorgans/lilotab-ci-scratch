@@ -3,7 +3,7 @@
 // Clock.now() (performance.now) starts at 0 and only moves when a test advances it.
 
 import { onTestFinished, vi } from 'vite-plus/test';
-import type { CoreEvent, LiveTab } from '../../src/core/index.ts';
+import type { ClosedTab, CoreEvent, LiveTab } from '../../src/core/index.ts';
 import { clock } from '../../src/worker/adapters/clock/index.ts';
 import { createIngress, type Ingress } from '../../src/worker/ingress.ts';
 import { POPUP_PAGE, SWITCH_COMMAND } from '../../src/worker/names.ts';
@@ -102,18 +102,28 @@ function createBrowser() {
     opened: [] as string[], // popup pages action.openPopup opened
     connected: [] as FakePort[], // ports the worker opened with tabs.connect
     log: [] as string[], // activation writes in order
+    badge: { text: '', background: '', color: '' }, // the toolbar icon's badge
     // The browser's toolbar click: the tab's popup if one is set, else action.onClicked (C-POP-09).
     click(tabId: number): void {
       const page = browser.popups.get(tabId);
       if (page) browser.opened.push(page);
       else api.action.onClicked.dispatch(find(tabId));
     },
-    press(tabId?: number): void {
-      api.commands.onCommand.dispatch(SWITCH_COMMAND, tabId === undefined ? undefined : find(tabId));
+    press(tabId?: number, command = SWITCH_COMMAND): void {
+      api.commands.onCommand.dispatch(command, tabId === undefined ? undefined : find(tabId));
     },
     createWindow(w: FakeWindow): void {
       browser.windows.push(w);
       api.windows.onCreated.dispatch(w);
+    },
+    createTab(t: FakeTab): void {
+      browser.tabs.push(t);
+      api.tabs.onCreated.dispatch(t);
+    },
+    removeTab(tabId: number): void {
+      const { windowId } = find(tabId);
+      browser.tabs = browser.tabs.filter((t) => t.id !== tabId);
+      api.tabs.onRemoved.dispatch(tabId, { windowId, isWindowClosing: false });
     },
     // A port from an extension page, as runtime.connect from that page delivers it.
     connect(name: string, url: string): FakePort {
@@ -142,6 +152,18 @@ function createBrowser() {
     },
     action: {
       onClicked: new FakeEvent<[FakeTab]>(),
+      setBadgeText({ text }: { text: string }) {
+        browser.badge.text = text;
+        return Promise.resolve();
+      },
+      setBadgeBackgroundColor({ color }: { color: string }) {
+        browser.badge.background = color;
+        return Promise.resolve();
+      },
+      setBadgeTextColor({ color }: { color: string }) {
+        browser.badge.color = color;
+        return Promise.resolve();
+      },
       getPopup: ({ tabId }: { tabId: number }) => Promise.resolve(browser.popups.get(tabId) ?? ''),
       setPopup: ({ tabId, popup }: { tabId: number; popup: string }) =>
         call('action.setPopup', () => {
@@ -181,6 +203,7 @@ function createBrowser() {
         return port;
       },
       onActivated: new FakeEvent(),
+      onCreated: new FakeEvent<[FakeTab]>(),
       onRemoved: new FakeEvent(),
       onDetached: new FakeEvent(),
       onAttached: new FakeEvent(),
@@ -236,6 +259,9 @@ export function collect(): { ingress: Ingress; stepped: CoreEvent[] } {
   });
   return { ingress, stepped };
 }
+
+// Include recently closed tabs Off: the entry adapter reads none (C-SRCH-27).
+export const noClosed = (): Promise<ClosedTab[]> => Promise.resolve([]);
 
 // Runs every pending timer and promise job.
 export const settle = (): Promise<unknown> => vi.runAllTimersAsync();

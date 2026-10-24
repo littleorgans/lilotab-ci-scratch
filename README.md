@@ -18,7 +18,9 @@ Tap the shortcut to jump back to your last tab. Hold it to see every tab in the 
 
 Requires desktop Chrome 148 or later. Lilotab does not run in private windows.
 
-The default shortcut is Cmd+E on macOS and Ctrl+Shift+E elsewhere. Change it at `chrome://extensions/shortcuts`. A welcome tab shows your shortcut on first install.
+The default shortcut is Cmd+E on macOS and Alt+Q elsewhere. Change it at `chrome://extensions/shortcuts`. A welcome tab shows your shortcut on first install.
+
+Vivaldi is out of the browser test matrix for now: it rejects `chrome.action.openPopup` (Vivaldi bug VB-120122), so the toolbar popup does not open there.
 
 ### Load unpacked
 
@@ -38,13 +40,13 @@ Until the Store listing is live, build Lilotab from source. You need Node 24.22.
 - **Search:** press F while holding to search tabs across every window. Press the modifier and F again to drop the query and go back to the window list, then release to switch.
 - **Toolbar:** click the toolbar icon to search all your tabs.
 
-**Settings:** quick tap (flip to last tab or open the list), quick tap scope, hold delay, tab order, list surface, theme, text size and reduce motion, plus clearing history and restoring defaults.
+**Settings:** quick tap (flip to last tab or open the list), quick tap scope, hold delay, tab order, where the list shows, recently closed tabs in search, a tab count badge, theme, text size and reduce motion, plus clearing history and restoring defaults.
 
 ## Privacy
 
 - **No network.** Lilotab makes no network requests and has no account, sync or telemetry. Tab icons come from the browser's own favicon cache.
 - **No standing site access.** It asks for no host permissions and runs no content scripts. It reaches a page only when you press the shortcut on it.
-- **Permissions:** `storage`, `tabs`, `favicon`, `activeTab` and `scripting`. Nothing else.
+- **Permissions:** `storage`, `tabs`, `favicon`, `activeTab` and `scripting`, plus the optional `sessions`, asked for only when you turn on recently closed tabs in search and given back when you turn it off. Nothing else.
 - **Stays on your device.** Settings live in Chrome's local extension storage. Recent tab history lives in session storage and clears when the browser closes or Lilotab updates.
 
 ## Contributing

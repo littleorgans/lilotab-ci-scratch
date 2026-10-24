@@ -12,7 +12,15 @@ function titles(query: string, rows: readonly Row[]) {
     const windowRank = r.windowRank ?? 0;
     const barIndex = r.barIndex ?? i;
     const url = `https://${r.title.toLowerCase().replaceAll(/\W+/gu, '')}.example/`;
-    return { url, useRank: null, ...r, windowRank, barIndex, ref: { window: windowRank, row: barIndex } };
+    return {
+      url,
+      useRank: null,
+      closed: false,
+      ...r,
+      windowRank,
+      barIndex,
+      ref: { window: windowRank, row: barIndex },
+    };
   });
   return rank(query, all).map((ref) => all.find((c) => sameRow(c.ref, ref))?.title);
 }
@@ -85,13 +93,31 @@ describe('TB-06 ranking.rank', () => {
       ],
       expected: ['Mail here', 'Mail there'],
     },
+    {
+      name: 'C-SRCH-27 recently closed rows follow the open rows of their tier, most recently closed first',
+      query: 'mail',
+      rows: [
+        { title: 'Mail closed later', closed: true, windowRank: 2, barIndex: 1 },
+        { title: 'Webmail', useRank: 0 },
+        { title: 'Mail closed', closed: true, windowRank: 2, barIndex: 0 },
+        { title: 'Mail never used', windowRank: 1 },
+        { title: 'Mail', useRank: 3 },
+      ],
+      expected: ['Mail', 'Mail never used', 'Mail closed', 'Mail closed later', 'Webmail'],
+    },
+    {
+      name: 'C-SRCH-27 an empty query lists no recently closed rows',
+      query: '',
+      rows: [{ title: 'Open' }, { title: 'Closed', closed: true, windowRank: 1, barIndex: 0 }],
+      expected: ['Open'],
+    },
   ])('$name', ({ query, rows, expected }) => {
     expect(titles(query, rows)).toEqual(expected);
   });
 
   it('C-SRCH-19 search reads the full title frozen at the press, beyond the cut hosts show', () => {
     const facts = live(win(1, 1, 1, tab(2, { title: `${'x'.repeat(TITLE_MAX)} needle` })));
-    const s = buildSnapshot(history(facts), facts, DEFAULTS, { tabId: 1, windowId: 1 });
+    const s = buildSnapshot(history(facts), facts, DEFAULTS, { tabId: 1, windowId: 1 }, []);
     const rows = s ? candidates(s) : [];
     expect(rank('needle', rows).map((ref) => s?.windows[ref.window]?.rows[ref.row]?.tabId)).toEqual([2]);
   });

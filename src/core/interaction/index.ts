@@ -42,6 +42,7 @@ export function init(boot: BootId, stored: unknown, settings: unknown, live: Liv
   reportSettings(run, read);
   if (read.source === 'migrated') emit(run, { kind: 'saveSettings', settings: storeSettings(read.settings) });
   if (live) setRecents(run, reconcile(envelope.recents, live)); // C-REC-09
+  emit(run, { kind: 'showBadge', on: read.settings.tabCountBadge === 'on' }); // C-SET-27
   return { model: run.model, effects: run.effects };
 }
 
@@ -83,6 +84,7 @@ function handle(run: Run, e: CoreEvent): void {
   switch (e.kind) {
     case 'command':
     case 'toolbarClicked':
+    case 'searchCommand':
       onPress(run, e);
       break;
     case 'hostStatus':
@@ -106,6 +108,8 @@ function handle(run: Run, e: CoreEvent): void {
       // T-53: from the next interaction; a live one keeps its binding, look, snapshot and dues
       const read = readSettings(e.settings);
       reportSettings(run, read);
+      const badge = read.settings.tabCountBadge;
+      if (badge !== run.model.settings.tabCountBadge) emit(run, { kind: 'showBadge', on: badge === 'on' }); // C-SET-27
       run.model = { ...run.model, settings: read.settings };
       break;
     }

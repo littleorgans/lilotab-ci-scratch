@@ -43,6 +43,14 @@ export interface LiveTab {
   iconKey: string | null;
 }
 
+// One sessions.getRecentlyClosed tab entry, read at the press (C-SRCH-27); never a private tab (C-PRIV-08).
+export interface ClosedTab {
+  sessionId: string;
+  title: string;
+  url: string;
+  iconKey: string | null;
+}
+
 // Developer builds log these; release builds drop them (C-SET-14). detail names a cause, field or kind, never a value.
 export type DiagnosticCode =
   | 'envelopeDiscarded'

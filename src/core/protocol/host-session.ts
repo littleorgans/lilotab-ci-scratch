@@ -3,8 +3,8 @@
 // The session adapter holds the value, performs the effects in order and owns the DOM, ping and sensors.
 
 import { sameRow, type RowRef } from '../types.ts';
-import type { Frame, HostInput, HostMode, IconPatch, StartView } from './messages.ts';
-import { parseWorkerToHost } from './parse.ts';
+import type { CopyText, Frame, HostInput, HostMode, IconPatch, StartView } from './messages.ts';
+import { parseWorkerToHost, shapeOf } from './parse.ts';
 
 export interface HostSession {
   origin: HostMode; // the start view's mode: a list started in search has no hold to go back to (T-67, K-14)
@@ -12,11 +12,13 @@ export interface HostSession {
   acked: HostMode; // the worker's mode as its last admitted frame states it
   pending: number; // local switches whose acknowledging frame has not arrived
   quiet: boolean; // a hold ending input was sent: hidden, and no frame paints (03 4.12)
-  shape: readonly number[]; // rows per start view window, for parsing (05 4.5)
+  shape: readonly number[]; // rows per start view window, then the closed window's, for parsing (05 4.5)
   quickTap: StartView['quickTap']; // frozen at the press (C-SET-19)
   open: boolean; // the open list (T-68): latched locally or by a frame, never cleared; survives search
+  visible: boolean; // shown by the last paint or local search latch; a return to hold keeps it shown (K-08, T-67)
   source: RowRef; // the source tab's row
   target: RowRef | null; // the last painted cursor or highlighted result; null for no search results
+  copy: CopyText | null; // the last painted frame's, for the copy keys (K-34)
   ending: 'fade' | 'cut'; // how the list closes (03 4.12): a cut after a commit candidate on another tab
 }
 
@@ -25,6 +27,7 @@ const targetOf = (frame: Frame): RowRef | null =>
   frame.mode === 'hold' ? { window: frame.window, row: frame.row } : (frame.results[frame.highlight] ?? null);
 
 const isOpen = (frame: Frame) => frame.mode === 'hold' && frame.open;
+const isVisible = (frame: Frame) => frame.mode === 'search' || frame.visible;
 
 export const sessionOf = (start: StartView): HostSession => ({
   origin: start.mode,
@@ -32,11 +35,13 @@ export const sessionOf = (start: StartView): HostSession => ({
   acked: start.mode,
   pending: 0,
   quiet: false,
-  shape: start.view.windows.map((w) => w.rows.length),
+  shape: shapeOf(start.view),
   quickTap: start.quickTap,
   open: isOpen(start.frame),
+  visible: isVisible(start.frame),
   source: { window: 0, row: start.view.windows[0]?.current ?? 0 },
   target: targetOf(start.frame),
+  copy: start.frame.copy,
   ending: 'fade',
 });
 
@@ -81,7 +86,7 @@ function receive(s: HostSession | null, raw: unknown): SessionStep {
     next = { ...s, acked: frame.mode, pending: s.pending - 1 };
   }
   if (next.pending > 0 || next.quiet) return { session: next, effects: [] }; // pending 0 means acked equals mode
-  const painted = { ...next, target: targetOf(frame) };
+  const painted = { ...next, target: targetOf(frame), copy: frame.copy, visible: isVisible(frame) };
   const paint: SessionEffect = { kind: 'paint', frame };
   // An open frame latches a list the host missed, after a stale paint; a closed one never unlatches it (T-68).
   if (isOpen(frame) && !next.open) return { session: { ...painted, open: true }, effects: [paint, { kind: 'open' }] };
@@ -98,7 +103,7 @@ function receive(s: HostSession | null, raw: unknown): SessionStep {
 function send(s: HostSession, input: HostInput): SessionStep {
   const post: SessionEffect = { kind: 'post', input };
   const toggle = (effect: 'latch' | 'unlatch'): SessionStep => ({
-    session: { ...s, mode: other(s.mode), pending: s.pending + 1 },
+    session: { ...s, mode: other(s.mode), pending: s.pending + 1, visible: true },
     effects: [{ kind: effect }, post],
   });
   if (input.kind === 'latchSearch' && s.mode === 'hold') return toggle('latch');

@@ -57,7 +57,7 @@ export const startView = (over: Partial<StartView> = {}): StartView => ({
   binding: CMD_E,
   quickTap: 'flip',
   look: lookOf(DEFAULTS),
-  view: { windows: [{ current: 0, rows: [row('Source'), row('Second'), row('Third')] }] },
-  frame: { mode: 'hold', visible: true, open: false, window: 0, row: 0 },
+  view: { windows: [{ current: 0, rows: [row('Source'), row('Second'), row('Third')] }], closed: [] },
+  frame: { mode: 'hold', visible: true, open: false, window: 0, row: 0, gone: [], copy: null },
   ...over,
 });

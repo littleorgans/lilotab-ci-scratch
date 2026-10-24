@@ -1,7 +1,15 @@
 // Key classification and host sensor rules, run inside hosts (04-state-machine 7, 03-components 4.9).
 // Hosts read keys and paint; these rules decide what each trusted event means and whether the page may see it.
 
-import { NAMED_KEYS, QUERY_MAX, fitText, type Binding, type HostInput, type HostMode } from '../protocol/index.ts';
+import {
+  NAMED_KEYS,
+  PAGE_MAX,
+  QUERY_MAX,
+  fitText,
+  type Binding,
+  type HostInput,
+  type HostMode,
+} from '../protocol/index.ts';
 
 export interface KeyFacts {
   type: 'keydown' | 'keyup' | 'pointermove' | 'pointerdown';
@@ -18,16 +26,24 @@ export interface KeyFacts {
 
 // binding null (toolbar search only): no key is the held letter or its Shift form (C-POP-09). origin: the start view's
 // mode; a list that started in search (toolbar) has no hold mode to go back to. open: hold is the open list (T-68).
+// field: whether the focused search field holds text (K-11, K-30) and a selection (K-14, K-34); null without it.
+// mac: the close and copy keys' modifiers (K-33, K-34). pageRows: the whole rows the list shows (K-32).
 export interface KeyContext {
   binding: Binding | null;
   mode: HostMode;
   origin: HostMode;
   open: boolean;
+  field: { text: boolean; selected: boolean } | null;
+  mac: boolean;
+  pageRows: number;
 }
 
+// copy: the host copies the painted row's address, or its title and address, in the key handler (K-34).
+export type CopyKind = 'url' | 'titleUrl';
 export interface Classified {
   input: HostInput | null;
   swallow: boolean;
+  copy?: CopyKind;
 }
 
 const HELD_KEY: Readonly<Record<Binding['held'], string>> = { meta: 'Meta', ctrl: 'Control', alt: 'Alt' };
@@ -62,10 +78,24 @@ const SIDES: Readonly<Record<string, 1 | -1>> = { ArrowRight: 1, ArrowLeft: -1 }
 const send = (input: HostInput | null, swallow: boolean): Classified => ({ input, swallow });
 const NOTHING = send(null, false);
 
+// Ctrl+Cmd+W on macOS; elsewhere Ctrl+Alt+W, only when the produced key is W, so an AltGr layout keeps the character
+// it types with Ctrl+Alt+W (K-33, C-SRCH-25).
+const isCloseKey = (f: KeyFacts, mac: boolean): boolean =>
+  sameMods(f, { meta: mac, ctrl: true, alt: !mac, shift: false }) &&
+  (mac ? isToken(f, 'W') : f.key.toUpperCase() === 'W');
+
+// Cmd+C, or Shift+Cmd+C for the title too; Ctrl off macOS (K-34, C-SRCH-26).
+function copyKind(f: KeyFacts, mac: boolean): CopyKind | null {
+  if (!sameMods(f, { meta: mac, ctrl: !mac, alt: false, shift: f.shift }) || !isToken(f, 'C')) return null;
+  return f.shift ? 'titleUrl' : 'url';
+}
+
 // A keydown in hold, open or not. Cancel comes first, so Esc and Backspace still cancel after a missed release; only
-// closed hold reads a key without the held key as that release. letterMove comes before F, also for a binding whose
-// letter is F. The open list is latched like search: no key is a release, and the list keeps every key (C-TAP-11).
-function classifyHoldKeydown(f: KeyFacts, b: Binding | null, open: boolean): Classified {
+// closed hold reads a key without the held key as that release. letterMove comes before the close and copy keys and
+// F, also for a binding whose letter is W, C or F. The open list is latched like search: no key is a release, and the
+// list keeps every key (C-TAP-11).
+function classifyHoldKeydown(f: KeyFacts, c: KeyContext): Classified {
+  const { binding: b, open } = c;
   if (f.key === 'Escape' || f.key === 'Backspace') return send({ kind: 'cancel', cause: 'key' }, true); // K-02, K-27
   if (!open && !isHeld(f, b)) return send({ kind: 'release', inferred: true }, false); // K-03
   const step = letterMove(f, b);
@@ -74,13 +104,17 @@ function classifyHoldKeydown(f: KeyFacts, b: Binding | null, open: boolean): Cla
   if (arrow) return send({ kind: 'move', delta: arrow }, true); // K-04, K-05, K-23
   const side = SIDES[f.key];
   if (side) return send({ kind: 'window', delta: side }, true); // K-06, K-24, swallowed even with one window
+  if (isCloseKey(f, c.mac)) return send({ kind: 'close' }, true); // K-33
+  const copy = copyKind(f, c.mac);
+  if (copy) return { input: { kind: 'activity' }, swallow: true, copy }; // K-34
   if (open && f.key === 'Enter') return send({ kind: 'enter' }, true); // K-25
   // K-07, K-26; a held down F toggles once
   if (isToken(f, 'F')) return send(f.repeat ? null : { kind: 'latchSearch' }, true);
   return send({ kind: 'activity' }, open); // K-08; K-29, Tab included: focus stays on the list
 }
 
-function classifyHold(f: KeyFacts, b: Binding | null): Classified {
+function classifyHold(f: KeyFacts, c: KeyContext): Classified {
+  const b = c.binding;
   const held = isHeld(f, b);
   if (f.type === 'pointermove' || f.type === 'pointerdown') {
     return send(held ? { kind: 'activity' } : { kind: 'release', inferred: true }, false); // K-08, K-03
@@ -89,31 +123,56 @@ function classifyHold(f: KeyFacts, b: Binding | null): Classified {
     if (b && f.key === HELD_KEY[b.held]) return send({ kind: 'release', inferred: false }, false); // K-01
     return held ? send({ kind: 'activity' }, false) : NOTHING;
   }
-  return classifyHoldKeydown(f, b, false);
+  return classifyHoldKeydown(f, c);
 }
 
-function classifyOpen(f: KeyFacts, b: Binding | null): Classified {
+function classifyOpen(f: KeyFacts, c: KeyContext): Classified {
   if (f.type !== 'keydown') return NOTHING; // K-28; the host swallows a keyup whose keydown it swallowed
-  return classifyHoldKeydown(f, b, true);
+  return classifyHoldKeydown(f, c);
 }
 
-function classifySearch(f: KeyFacts, b: Binding | null, origin: HostMode): Classified {
+const ENDS = [
+  ['Home', 'first'],
+  ['End', 'last'],
+] as const;
+const PAGES = [
+  ['PageDown', 1],
+  ['PageUp', -1],
+] as const;
+const tokenIn = <T>(f: KeyFacts, table: readonly (readonly [string, T])[]): T | undefined =>
+  table.find(([token]) => isToken(f, token))?.[1];
+
+// Esc with text clears the field and sends query '' (K-30); Shift with Home, End or a page key selects in the field,
+// and the copy key with text selected copies it (K-14).
+function classifySearch(f: KeyFacts, c: KeyContext): Classified {
+  const b = c.binding;
   if (f.type !== 'keydown' || f.composing) return NOTHING; // K-14, K-18; K-20 reports presses at keyup
   if (f.key === 'Enter') return send({ kind: 'enter' }, true); // K-10
-  if (f.key === 'Escape') return send({ kind: 'cancel', cause: 'key' }, true); // K-11
+  if (f.key === 'Escape') {
+    return send(c.field?.text ? { kind: 'query', text: '' } : { kind: 'cancel', cause: 'key' }, true); // K-30, K-11
+  }
   const step = ARROWS[f.key] ?? letterMove(f, b);
   if (step) return send({ kind: 'move', delta: step }, true); // K-12
   if (isHeld(f, b) && isToken(f, 'F')) {
-    return send(origin === 'hold' && !f.repeat ? { kind: 'leaveSearch' } : null, true); // K-22, else K-14
+    return send(c.origin === 'hold' && !f.repeat ? { kind: 'leaveSearch' } : null, true); // K-22, else K-14
   }
+  if (!f.shift) {
+    const to = tokenIn(f, ENDS);
+    if (to) return send({ kind: 'jump', to }, true); // K-31
+    const delta = tokenIn(f, PAGES);
+    if (delta) return send({ kind: 'page', delta, rows: Math.min(Math.max(c.pageRows, 1), PAGE_MAX) }, true); // K-32
+  }
+  if (isCloseKey(f, c.mac)) return send({ kind: 'close' }, true); // K-33
+  const copy = c.field?.selected ? null : copyKind(f, c.mac);
+  if (copy) return { input: null, swallow: true, copy }; // K-34; K-20 reports the press
   return NOTHING; // editing keys belong to the field (C-SRCH-15)
 }
 
 // Untrusted events never mean anything (K-16, C-SEC-01).
 export function classify(f: KeyFacts, c: KeyContext): Classified {
   if (!f.trusted) return NOTHING;
-  if (c.mode === 'search') return classifySearch(f, c.binding, c.origin);
-  return c.open ? classifyOpen(f, c.binding) : classifyHold(f, c.binding);
+  if (c.mode === 'search') return classifySearch(f, c);
+  return c.open ? classifyOpen(f, c) : classifyHold(f, c);
 }
 
 // The full text, only when it changed and no composition is active (K-09, K-19, C-SRCH-11).

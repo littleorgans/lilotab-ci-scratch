@@ -2,6 +2,7 @@
 // paint through the list view, run the five sensors through the core host input rules (04-state-machine 7) and send
 // what they mean. Holds only host local state (03 4.12); the worker's disconnect is the close (05-events 4.4).
 
+import { isMac } from '../../browser/platform.ts';
 import {
   FIELD_EVENTS,
   hostInputStep,
@@ -16,6 +17,7 @@ import {
   PING_MS,
   type DeclineReason,
   type HostInput,
+  type HostMode,
   type HostToWorker,
   type StartView,
 } from '../../core/protocol/index.ts';
@@ -26,7 +28,7 @@ export interface Host {
   alive(): boolean; // this instance's extension context still works (05 5); every callback checks it first
   dispose(): void; // a dead instance lets go of everything and lets the event through
   decline(): DeclineReason | null; // checked on start; the overlay may refuse (05 4.6), the popup never does
-  mount(): Mounted;
+  mount(mode: HostMode): Mounted; // the start view's mode: an overlay started in search marks itself as latch does
   focused(): Promise<void>; // the popup posts ready only once it has focus (05 3.3)
   closed(): void; // after the session ends
 }
@@ -71,9 +73,10 @@ function factsOf(e: Event, type: Sensed): KeyFacts | null {
 }
 
 const fieldValue = (m: Mounted): string | null => (m.surface.inField() ? m.surface.field.value : null);
+const fieldSelected = ({ surface: { field } }: Mounted): boolean => field.selectionStart !== field.selectionEnd;
 
 export function runSession(port: chrome.runtime.Port, host: Host): Session {
-  let state = initialHostInputState(); // the session (03 4.12, 05 4.5), its binding and the sensors' memory
+  let state = initialHostInputState(isMac()); // the session (03 4.12, 05 4.5), its binding and the sensors' memory
   let mounted: Mounted | null = null;
   let done = false;
   let ping: ReturnType<typeof setInterval> | undefined;
@@ -188,6 +191,14 @@ export function runSession(port: chrome.runtime.Port, host: Host): Session {
         if (effect.preventDefault) original?.preventDefault();
         if (effect.stopImmediatePropagation) original?.stopImmediatePropagation();
         break;
+      // Esc with text: no input event fires, and the query '' follows (K-30).
+      case 'clearField':
+        if (mounted) mounted.surface.field.value = '';
+        break;
+      // In the trusted key handler; the copy's own focus moves are not leaving (K-15, K-34).
+      case 'copy':
+        moveFocus(() => mounted?.surface.copy(effect.text));
+        break;
     }
   }
 
@@ -228,6 +239,8 @@ export function runSession(port: chrome.runtime.Port, host: Host): Session {
         // oxlint-disable-next-line typescript/no-deprecated -- IME code 229 can arrive with isComposing false.
         keyCode: e instanceof KeyboardEvent ? e.keyCode : null,
         fieldValue: fieldValue(m),
+        fieldSelected: fieldSelected(m),
+        pageRows: type === 'keydown' ? m.surface.pageRows() : 1, // a layout read only where a page key can be
         owned: m.owns(e),
       },
       e,
@@ -308,7 +321,7 @@ export function runSession(port: chrome.runtime.Port, host: Host): Session {
       post({ t: 'declined', reason }); // dormant: the worker retires the attempt and disconnects
       return;
     }
-    mounted = host.mount();
+    mounted = host.mount(s.mode);
     mounted.surface.start(s); // the start frame is painted before ready
     await host.focused();
     if (done) return;

@@ -6,10 +6,12 @@ import type { AttemptId, RowRef } from '../types.ts';
 import { heldOf } from './binding.ts';
 import { MODIFIERS } from './keys.ts';
 import {
+  PAGE_MAX,
   PROTOCOL,
   QUERY_MAX,
   SITE_MAX,
   TITLE_MAX,
+  URL_MAX,
   iconSrc,
   type Binding,
   type ChannelPhase,
@@ -50,7 +52,8 @@ export function admit(host: 'overlay' | 'popup', phase: ChannelPhase, m: HostToW
 const DELTAS = [1, -1] as const;
 const CAUSES = ['key', 'blur', 'hidden', 'pageLeave'] as const;
 const REASONS = ['unfocused', 'frameFocus', 'pdf', 'unsupported'] as const;
-const BARE = ['latchSearch', 'leaveSearch', 'enter', 'ping', 'activity'] as const;
+const ENDS = ['first', 'last'] as const;
+const BARE = ['latchSearch', 'leaveSearch', 'enter', 'ping', 'activity', 'close'] as const;
 
 const isRowRef = (raw: unknown): raw is RowRef =>
   hasExactly(raw, ['window', 'row']) && isIndex(raw['window'], Infinity) && isIndex(raw['row'], Infinity);
@@ -74,6 +77,15 @@ function parseInput(raw: unknown): HostInput | null {
     case 'query': {
       const text = field('text');
       return isText(text, QUERY_MAX) ? { kind, text } : null;
+    }
+    case 'jump': {
+      const to = field('to');
+      return isOneOf(to, ENDS) ? { kind, to } : null;
+    }
+    case 'page': {
+      if (!hasExactly(raw, ['kind', 'delta', 'rows'])) return null;
+      const { delta, rows } = raw;
+      return isOneOf(delta, DELTAS) && isIndex(rows, PAGE_MAX + 1) && rows > 0 ? { kind, delta, rows } : null;
     }
     case 'pick': {
       const row = field('row');
@@ -138,32 +150,49 @@ const isWindowView = (raw: unknown): raw is Fields & { rows: unknown[]; current:
   raw['rows'].every(isRow);
 
 const isListView = (raw: unknown): raw is ListView =>
-  hasExactly(raw, ['windows']) &&
+  hasExactly(raw, ['windows', 'closed']) &&
   Array.isArray(raw['windows']) &&
   raw['windows'].length > 0 &&
-  raw['windows'].every(isWindowView);
+  raw['windows'].every(isWindowView) &&
+  Array.isArray(raw['closed']) &&
+  raw['closed'].every(isRow);
+
+// Rows per start view window, then the closed window's rows: the last entry (05 4.5, 4.9).
+export const shapeOf = (view: ListView): readonly number[] => [
+  ...view.windows.map((w) => w.rows.length),
+  view.closed.length,
+];
 
 const inShape = (ref: RowRef, shape: readonly number[]) => isIndex(ref.row, shape[ref.window] ?? 0);
 
-// Checked against its own mode (05 4.5); which mode a host admits is host-session.ts.
+const isRefs = (raw: unknown, shape: readonly number[]): raw is RowRef[] =>
+  Array.isArray(raw) && raw.every((r) => isRowRef(r) && inShape(r, shape));
+
+const isCopy = (raw: unknown): boolean =>
+  raw === null || (hasExactly(raw, ['title', 'url']) && isText(raw['title'], TITLE_MAX) && isText(raw['url'], URL_MAX));
+
+// Checked against its own mode (05 4.5); which mode a host admits is host-session.ts. Only search results may name
+// the closed window.
 function isFrame(raw: unknown, shape: readonly number[]): raw is Frame {
   if (!isRecord(raw)) return false;
+  if (!isCopy(raw['copy'])) return false;
   if (raw['mode'] === 'hold') {
+    const open = shape.slice(0, -1);
     return (
-      hasExactly(raw, ['mode', 'visible', 'open', 'window', 'row']) &&
+      hasExactly(raw, ['mode', 'visible', 'open', 'window', 'row', 'gone', 'copy']) &&
       typeof raw['visible'] === 'boolean' &&
       typeof raw['open'] === 'boolean' &&
-      isIndex(raw['window'], shape.length) &&
-      isIndex(raw['row'], shape[raw['window']] ?? 0)
+      isIndex(raw['window'], open.length) &&
+      isIndex(raw['row'], open[raw['window']] ?? 0) &&
+      isRefs(raw['gone'], open)
     );
   }
   const results = raw['results'];
   return (
     raw['mode'] === 'search' &&
-    hasExactly(raw, ['mode', 'query', 'results', 'highlight']) &&
+    hasExactly(raw, ['mode', 'query', 'results', 'highlight', 'copy']) &&
     isText(raw['query'], QUERY_MAX) &&
-    Array.isArray(results) &&
-    results.every((r) => isRowRef(r) && inShape(r, shape)) &&
+    isRefs(results, shape) &&
     (results.length === 0 ? raw['highlight'] === 0 : isIndex(raw['highlight'], results.length))
   );
 }
@@ -176,12 +205,7 @@ function isStart(raw: unknown): raw is StartView {
   const binding = raw['binding'];
   if (binding === null ? mode !== 'search' : !isBinding(binding)) return false;
   const frame = raw['frame'];
-  return (
-    isFrame(
-      frame,
-      raw['view'].windows.map((w) => w.rows.length),
-    ) && frame.mode === mode
-  );
+  return isFrame(frame, shapeOf(raw['view'])) && frame.mode === mode;
 }
 
 const isIconPatch = (raw: unknown, shape: readonly number[]): raw is IconPatch =>

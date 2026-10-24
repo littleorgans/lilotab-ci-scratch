@@ -17,7 +17,7 @@ import {
 describe('TB-07 settings.read', () => {
   it.each<{ name: string; raw: unknown; settings: Partial<Settings>; source: string; issues: string[] }>([
     {
-      name: 'C-SET-02 to C-SET-09 absent gives the defaults',
+      name: 'C-SET-02 to C-SET-09, C-SET-22 and C-SET-23 absent give the defaults',
       raw: undefined,
       settings: DEFAULTS,
       source: 'absent',
