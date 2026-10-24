@@ -5,7 +5,7 @@ import { expect, onTestFinished, test, vi } from 'vite-plus/test';
 import { readTiming, TIMING_KEY, TIMING_MAX, type TimingRecord } from '../src/browser/timing.ts';
 import { init, step, type CoreEvent, type DeclineReason } from '../src/core/index.ts';
 import { createGestureLog } from '../src/worker/timing/record.ts';
-import { LIVE, esc, press, ready, release, status, tick, type Ev } from './interaction-harness.ts';
+import { LIVE, STORED, esc, press, ready, release, status, tick, type Ev } from './interaction-harness.ts';
 
 const ORIGIN = 1_700_000_000_000;
 
@@ -13,7 +13,7 @@ function setup() {
   const records: TimingRecord[] = [];
   const log = createGestureLog(ORIGIN, (r) => records.push(r));
   const ctx = {
-    model: init('boot', undefined, { version: 1 }, LIVE.two).model,
+    model: init('boot', undefined, STORED, LIVE.two).model,
     live: LIVE.two,
     last: null as string | null,
   };

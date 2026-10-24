@@ -12,10 +12,20 @@ import {
 } from '../src/core/index.ts';
 import { CMD_E, CTRL_SHIFT_E, binding, keyFacts, pointer } from './host-fixtures.ts';
 
-const HOLD: KeyContext = { binding: CMD_E, mode: 'hold', origin: 'hold', open: false };
+const HOLD: KeyContext = {
+  binding: CMD_E,
+  mode: 'hold',
+  origin: 'hold',
+  open: false,
+  field: null,
+  mac: true,
+  pageRows: 8,
+};
 const OPEN: KeyContext = { ...HOLD, open: true };
-const SEARCH: KeyContext = { ...HOLD, mode: 'search' };
-const TOOLBAR: KeyContext = { binding: null, mode: 'search', origin: 'search', open: false };
+const SEARCH: KeyContext = { ...HOLD, mode: 'search', field: { text: false, selected: false } };
+const TOOLBAR: KeyContext = { ...SEARCH, binding: null, origin: 'search' };
+const TYPED: KeyContext = { ...SEARCH, field: { text: true, selected: false } };
+const ELSEWHERE: KeyContext = { ...SEARCH, binding: CTRL_SHIFT_E, mac: false }; // Windows, Linux, ChromeOS
 
 const cmd = (key: string, over: Partial<KeyFacts> = {}) => keyFacts(key, { meta: true, ...over });
 
@@ -226,6 +236,121 @@ const rows: Row[] = [
     facts: cmd('f', { repeat: true }),
     context: SEARCH,
     expected: kept(null),
+  },
+  // search box keys and list actions (planned rows, settings build)
+  {
+    name: 'K-11 C-SRCH-14: search, Esc with an empty field cancels',
+    facts: keyFacts('Escape'),
+    context: SEARCH,
+    expected: kept({ kind: 'cancel', cause: 'key' }),
+  },
+  {
+    name: 'K-30 C-SRCH-14: search, Esc with text clears the query',
+    facts: keyFacts('Escape'),
+    context: TYPED,
+    expected: kept({ kind: 'query', text: '' }),
+  },
+  {
+    name: 'K-31 C-SRCH-23: search, Home jumps first',
+    facts: keyFacts('Home'),
+    context: TYPED,
+    expected: kept({ kind: 'jump', to: 'first' }),
+  },
+  {
+    name: 'K-31 C-SRCH-23: search, End jumps last',
+    facts: keyFacts('End'),
+    context: TYPED,
+    expected: kept({ kind: 'jump', to: 'last' }),
+  },
+  {
+    name: 'K-14 C-SRCH-23: search, Shift+Home selects in the field',
+    facts: keyFacts('Home', { shift: true }),
+    context: TYPED,
+    expected: seen(null),
+  },
+  {
+    name: 'K-32 C-SRCH-24: search, Page Down moves by the rows the list shows',
+    facts: keyFacts('PageDown'),
+    context: SEARCH,
+    expected: kept({ kind: 'page', delta: 1, rows: 8 }),
+  },
+  {
+    name: 'K-33 C-SRCH-25: search, macOS Ctrl+Cmd+W closes',
+    facts: keyFacts('w', { meta: true, ctrl: true }),
+    context: SEARCH,
+    expected: kept({ kind: 'close' }),
+  },
+  {
+    name: 'K-33 C-SRCH-25: search, macOS Ctrl+Cmd+Shift+W is no close key',
+    facts: keyFacts('W', { meta: true, ctrl: true, shift: true }),
+    context: SEARCH,
+    expected: seen(null),
+  },
+  {
+    name: 'K-33 C-SRCH-25: search elsewhere, Ctrl+Alt+W producing W closes',
+    facts: keyFacts('w', { ctrl: true, alt: true }),
+    context: ELSEWHERE,
+    expected: kept({ kind: 'close' }),
+  },
+  {
+    name: 'K-33 C-SRCH-25: search elsewhere, Ctrl+Alt+W producing an AltGr character belongs to the field',
+    facts: keyFacts('ł', { ctrl: true, alt: true, code: 'KeyW' }),
+    context: ELSEWHERE,
+    expected: seen(null),
+  },
+  {
+    name: 'K-33 C-HOLD-27: hold, the close key with the held key closes',
+    facts: keyFacts('w', { meta: true, ctrl: true }),
+    context: HOLD,
+    expected: kept({ kind: 'close' }),
+  },
+  {
+    name: 'K-33 K-03: hold with an Alt binding, the close key without the held key is a release',
+    facts: keyFacts('w', { meta: true, ctrl: true }),
+    context: { ...HOLD, binding: binding('alt', 'Q') },
+    expected: seen({ kind: 'release', inferred: true }),
+  },
+  {
+    name: 'K-34 C-HOLD-27: hold, Cmd+C copies the address and sends activity',
+    facts: cmd('c'),
+    context: HOLD,
+    expected: { input: { kind: 'activity' }, swallow: true, copy: 'url' },
+  },
+  {
+    name: 'K-34 C-SRCH-26: search, Shift+Cmd+C copies the title and address, K-20 reports the press',
+    facts: cmd('C', { shift: true }),
+    context: TYPED,
+    expected: { input: null, swallow: true, copy: 'titleUrl' },
+  },
+  {
+    name: 'K-34 C-SRCH-26: search, Ctrl+Shift+Cmd+C copies the title and address',
+    facts: keyFacts('C', { meta: true, ctrl: true, shift: true }),
+    context: SEARCH,
+    expected: { input: null, swallow: true, copy: 'titleUrl' },
+  },
+  {
+    name: 'K-34 C-HOLD-27: hold elsewhere with Alt held, Ctrl+Alt+C copies the address',
+    facts: keyFacts('c', { ctrl: true, alt: true }),
+    context: { ...HOLD, binding: binding('alt', 'Q'), mac: false },
+    expected: { input: { kind: 'activity' }, swallow: true, copy: 'url' },
+  },
+  {
+    name: 'K-34 C-SRCH-26: search elsewhere, Ctrl+Alt+C producing an AltGr character belongs to the field',
+    facts: keyFacts('ć', { ctrl: true, alt: true, code: 'KeyC' }),
+    context: ELSEWHERE,
+    expected: seen(null),
+  },
+  {
+    name: 'K-14 C-SRCH-26: search, Cmd+C with text selected copies it in the field',
+    facts: cmd('c'),
+    context: { ...SEARCH, field: { text: true, selected: true } },
+    expected: seen(null),
+  },
+  {
+    name: 'K-34 K-04: hold, a binding letter C steps before copy',
+    facts: cmd('c'),
+    context: { ...HOLD, binding: binding('meta', 'C') },
+    expected: kept({ kind: 'step', delta: 1 }),
   },
   // untrusted
   ...[HOLD, OPEN, SEARCH].map((context): Row => ({

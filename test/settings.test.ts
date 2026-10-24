@@ -9,6 +9,7 @@ import {
   editStep,
   inactive,
   readSettings,
+  shownOf,
   storeSettings,
   writable,
   type Settings,
@@ -17,7 +18,7 @@ import {
 describe('TB-07 settings.read', () => {
   it.each<{ name: string; raw: unknown; settings: Partial<Settings>; source: string; issues: string[] }>([
     {
-      name: 'C-SET-02 to C-SET-09 absent gives the defaults',
+      name: 'C-SET-02 to C-SET-09, C-SET-22 and C-SET-23 absent give the defaults',
       raw: undefined,
       settings: DEFAULTS,
       source: 'absent',
@@ -102,11 +103,27 @@ describe('TB-07 settings.read', () => {
     expect(storeSettings({ ...DEFAULTS, quickTap: 'list' })).toEqual({ version: 1, quickTap: 'list' });
   });
 
-  it('C-SET-11 Restore defaults writes the version alone, clearing Open tab list', () => {
+  it('C-SET-11 C-SET-29 Restore defaults writes the version alone, clearing Open tab list, and gives the permission back', () => {
     const edit = editStep(IDLE_EDIT, { kind: 'read', raw: { version: 1, quickTap: 'list' } }).edit;
-    expect(editStep(edit, { kind: 'edit', patch: DEFAULTS }).effects).toMatchObject([
+    expect(editStep(edit, { kind: 'edit', patch: DEFAULTS, group: 'privacy' }).effects).toMatchObject([
       { kind: 'write', stored: { version: 1 } },
+      { kind: 'removeSessions' },
     ]);
+  });
+
+  it('C-SET-29 On asks first, writes only when granted, and shows Off while the permission is missing', () => {
+    const on = { patch: { closedTabs: 'on' }, group: 'search' } as const;
+    const read = editStep(IDLE_EDIT, { kind: 'read', raw: { version: 1, closedTabs: 'on' } }).edit;
+    expect(shownOf(read).closedTabs).toBe('off');
+    const asking = editStep(read, { kind: 'edit', ...on });
+    expect(asking.effects).toEqual([{ kind: 'requestSessions' }]);
+    expect(shownOf(asking.edit).closedTabs).toBe('on');
+    const denied = editStep(asking.edit, { kind: 'asked', result: 'denied' });
+    expect(denied.effects).toEqual([]);
+    expect(shownOf(denied.edit).closedTabs).toBe('off');
+    const granted = editStep(editStep(denied.edit, { kind: 'edit', ...on }).edit, { kind: 'asked', result: 'granted' });
+    expect(granted.effects).toMatchObject([{ kind: 'write', stored: { version: 1, closedTabs: 'on' } }]);
+    expect(shownOf(granted.edit).closedTabs).toBe('on');
   });
 
   // Build spec 5 item 2: the rule the options page renders.

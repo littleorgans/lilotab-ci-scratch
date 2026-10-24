@@ -12,7 +12,7 @@ import {
   type TimingRecord,
 } from '../../browser/timing.ts';
 import { PRODUCT } from '../../strings.ts';
-import { el, group, row } from '../dom.ts';
+import { el, group, hint, row } from '../dom.ts';
 
 const RECENT = 30; // table rows, newest first
 
@@ -28,6 +28,8 @@ const TEXT = {
   empty: 'No gestures yet.',
   columns: ['Time', 'Host', 'Page', 'Delay', 'Ready', 'Input', 'Dwell', 'Shown', 'Outcome'],
 } as const;
+
+export const TIMING_HEADING = TEXT.heading; // the ninth group, after About and in the side index
 
 const STYLE = `
 .timing-rows { display: block; overflow-x: auto; padding: 8px 10px; }
@@ -162,9 +164,13 @@ export function timingGroup(): HTMLElement {
   refresh();
 
   document.head.append(el('style', {}, [STYLE]));
-  return group(TEXT.heading, [
-    row(TEXT.record, [el('p', { class: 'hint' }, [TEXT.kept])], toggle.node, 'label-timing'),
-    row(TEXT.log, [status], el('div', { class: 'timing-actions' }, [exportButton, clear])),
-    recent,
-  ]);
+  return group(
+    TEXT.heading,
+    [
+      row(TEXT.record, [hint(TEXT.kept)], toggle.node, 'label-timing'),
+      row(TEXT.log, [status], el('div', { class: 'timing-actions' }, [exportButton, clear])),
+      recent,
+    ],
+    'timing',
+  );
 }

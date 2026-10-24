@@ -8,6 +8,7 @@ import {
   queryInput,
   trackPress,
   type Classified,
+  type CopyKind,
   type KeyContext,
   type KeyFacts,
   type Presses,
@@ -38,6 +39,8 @@ export interface KeySensor {
   facts: KeyFacts; // composing: the event's own isComposing; the composition remembered here is added to it
   keyCode: number | null; // null for a pointer; IME key code 229 can arrive with isComposing false
   fieldValue: string | null; // the field's value while it has focus, else null
+  fieldSelected: boolean; // the focused field has a selection (K-34)
+  pageRows: number; // the whole rows the list shows (K-32)
   owned: boolean; // the event happened inside the list
 }
 
@@ -62,15 +65,20 @@ export interface SensorMemory {
 export interface HostInputState {
   session: HostSession | null; // mode, quiet and admission (03 4.12, 05 4.5); null before start
   binding: Binding | null; // the admitted start view's, for classification
+  mac: boolean; // the close and copy keys' modifiers (K-33, K-34)
   sensor: SensorMemory;
 }
 
 export type HostEvent = SessionInput | HostSensor;
 
 // Whether the page may see the event: a swallowed key is both, an event inside the list only stops (C-KEY-06).
+// clearField: the field empties without an input event before its query '' (K-30). copy: the host copies text in
+// the key handler, or says it could not when text is null or the browser refuses (K-34, C-SRCH-26).
 export type HostEffect =
   | SessionEffect
-  | { kind: 'consume'; preventDefault: boolean; stopImmediatePropagation: boolean };
+  | { kind: 'consume'; preventDefault: boolean; stopImmediatePropagation: boolean }
+  | { kind: 'clearField' }
+  | { kind: 'copy'; text: string | null };
 
 // The rest of one key or pointer event, once the effects before it have run: classification after the query a
 // recovered composition sent, or the open list's reading after the release that opened it.
@@ -84,9 +92,10 @@ export interface HostInputResult {
   resume: HostResume | null;
 }
 
-export const initialHostInputState = (): HostInputState => ({
+export const initialHostInputState = (mac: boolean): HostInputState => ({
   session: null,
   binding: null,
+  mac,
   sensor: { composing: false, lastSent: '', presses: NO_PRESSES, swallowed: new Set() },
 });
 
@@ -103,11 +112,14 @@ const then = (first: Step, next: (s: HostInputState) => Step): Step => {
   return { state: second.state, effects: [...first.effects, ...second.effects] };
 };
 
-const contextOf = (session: HostSession, binding: Binding | null): KeyContext => ({
-  binding,
+const contextOf = (s: HostInputState, session: HostSession, e: KeySensor): KeyContext => ({
+  binding: s.binding,
   mode: session.mode,
   origin: session.origin,
   open: session.open,
+  field: e.fieldValue === null ? null : { text: e.fieldValue !== '', selected: e.fieldSelected },
+  mac: s.mac,
+  pageRows: e.pageRows,
 });
 
 // The session reducer decides switches, hiding and admission (03 4.12). A start brings its binding. Back to hold the
@@ -119,7 +131,7 @@ function stepSession(s: HostInputState, input: SessionInput): Step {
     if (effect.kind === 'start') binding = effect.start.binding;
     if (effect.kind === 'unlatch') sensor = { ...sensor, composing: false, lastSent: '', presses: NO_PRESSES };
   }
-  return { state: { session: next.session, binding, sensor }, effects: next.effects };
+  return { state: { ...s, session: next.session, binding, sensor }, effects: next.effects };
 }
 
 // The full text, only when it changed and no composition is active (K-09, K-19); the press sent its query (K-20).
@@ -165,11 +177,18 @@ function sensed(s: HostInputState, e: KeySensor): HostInputResult {
   return classifySensed(s, e);
 }
 
+// A held press outside the shown list leaves it, as one in search or the open list does (K-08, K-15); the page still
+// sees the press.
+function outside(c: Classified, e: KeySensor, session: HostSession): Classified {
+  const leaving = e.facts.type === 'pointerdown' && c.input?.kind === 'activity' && !e.owned && session.visible;
+  return leaving ? { input: { kind: 'cancel', cause: 'blur' }, swallow: false } : c;
+}
+
 function classifySensed(s: HostInputState, e: KeySensor): HostInputResult {
   const { session } = s;
   if (!session || session.quiet) return done(still(s));
-  const facts = { ...e.facts, composing: s.sensor.composing || e.facts.composing };
-  const classified = classify(facts, contextOf(session, s.binding));
+  const facts = { ...e.facts, composing: s.sensor.composing || e.facts.composing || e.keyCode === 229 };
+  const classified = outside(classify(facts, contextOf(s, session, e)), e, session);
   // A release that opens the list here, a missed one included (K-03), is sent first; the same event then means what
   // it means in the open list, so a first unheld Down moves and is swallowed (T-68).
   if (classified.input?.kind === 'release' && session.quickTap === 'list' && !session.open) {
@@ -183,13 +202,22 @@ function classifySensed(s: HostInputState, e: KeySensor): HostInputResult {
 function replay(s: HostInputState, r: Extract<HostResume, { phase: 'replay' }>): HostInputResult {
   const { session } = s;
   const classified = session?.open
-    ? classify(r.facts, contextOf(session, s.binding))
+    ? classify(r.facts, contextOf(s, session, r.sensed))
     : { input: null, swallow: r.swallow };
   return done(finish(s, r.sensed, r.facts, classified));
 }
 
-// After any input sent first: whether the page may see the event, then the press K-20 reports, then its own input.
-function finish(s: HostInputState, e: KeySensor, f: KeyFacts, { input, swallow }: Classified): Step {
+// The painted row's text for a copy key: the address, or the title and address on two lines (K-34, C-SRCH-26). The
+// host copies only what it shows, so a hidden list copies nothing.
+function copied(session: HostSession, kind: CopyKind): HostEffect[] {
+  if (!session.visible) return [];
+  const { copy } = session;
+  return [{ kind: 'copy', text: copy && (kind === 'url' ? copy.url : `${copy.title}\n${copy.url}`) }];
+}
+
+// After any input sent first: whether the page may see the event, then the press K-20 reports, the copy, then its own
+// input. A query from a key is Esc with text: the field empties first, then it goes as the field's query (K-30).
+function finish(s: HostInputState, e: KeySensor, f: KeyFacts, { input, swallow, copy }: Classified): Step {
   const key = e.keyCode !== null;
   const search = s.session?.mode === 'search';
   const paired = !swallow && f.type === 'keyup' && s.sensor.swallowed.has(f.code);
@@ -207,9 +235,14 @@ function finish(s: HostInputState, e: KeySensor, f: KeyFacts, { input, swallow }
         ? [{ kind: 'consume', preventDefault: consumed || tab, stopImmediatePropagation: consumed || e.owned }]
         : [],
   };
-  for (const next of [tracked.input, input]) {
-    if (next) step = then(step, (t) => stepSession(t, { kind: 'send', input: next }));
+  const pressed = tracked.input;
+  if (pressed) step = then(step, (t) => stepSession(t, { kind: 'send', input: pressed }));
+  if (copy && s.session) step = { ...step, effects: [...step.effects, ...copied(s.session, copy)] };
+  if (input?.kind === 'query') {
+    step = { ...step, effects: [...step.effects, { kind: 'clearField' }] };
+    return then(step, (t) => query(t, input.text));
   }
+  if (input) step = then(step, (t) => stepSession(t, { kind: 'send', input }));
   return step;
 }
 

@@ -21,8 +21,11 @@ export function lookScenarios(c, e, add) {
           `${flavor === 'overlay' && width === 500 ? '454 / 436' : '542 / 524'} px panel / strip, whole cells at both ends, ${textSize === 'large' ? 40 : 32} px rows (AC-25; C-WIN-16, C-SET-09)`,
           async () => {
             const h = await c.open(flavor, { width, textSize });
-            await pause(110);
-            const start = await c.inspect(h);
+            // The popup shell is visible before .shown. Wait for the list and its renderer driven open motion.
+            const start = await until(async () => {
+              const x = await c.inspect(h);
+              return x.class?.split(' ').includes('shown') && !x.animations.length ? x : null;
+            });
             await c.key(h, 'ArrowLeft', HELD.modifier);
             const end = await until(async () => {
               const x = await c.inspect(h);

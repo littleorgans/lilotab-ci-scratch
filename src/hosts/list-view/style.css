@@ -177,6 +177,22 @@
   display: none;
 }
 
+/* "Could not copy" for 2 s (C-SRCH-26): one line over the list's foot, out of layout. */
+.notice {
+  position: absolute;
+  inset: auto var(--pad) var(--pad);
+  padding: 4px var(--inset);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--fg);
+  font-size: var(--small);
+  text-align: center;
+}
+.notice:empty {
+  display: none;
+}
+
 /* The outgoing rows' picture during a swap, over the live list and out of layout. */
 .copy {
   position: absolute;
@@ -240,6 +256,14 @@ span.icon {
   flex: none;
   width: 14px;
   height: 14px;
+  color: var(--fg2);
+}
+
+/* A recently closed row's mark, in the window marker's box; shown with one window too (C-SRCH-27). */
+.closed {
+  flex: none;
+  width: calc(var(--small) + 6px);
+  height: calc(var(--small) + 6px);
   color: var(--fg2);
 }
 

@@ -54,23 +54,73 @@ export async function fixtureServer() {
   return server;
 }
 
+// The clipboard verifier of probe p-clip: a page on its own loopback origin, the only origin granted clipboard access,
+// in a popup window, which the list never lists (C-WIN-14). seed writes a sentinel and reads it back; read reads the
+// clipboard once the verifier has focus again.
+export async function withVerifier(c, fn) {
+  const server = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'text/html');
+    res.end('<!doctype html><meta charset="utf-8"><title>Clipboard verifier</title>');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  let window;
+  try {
+    await c.root.send('Browser.grantPermissions', {
+      origin,
+      permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
+    });
+    window = await c.workerEval(
+      `chrome.windows.create({url:${JSON.stringify(`${origin}/verifier`)},type:'popup',focused:false})`,
+    );
+    const page = await c.pageFor(window.tabs[0].id);
+    const focus = async () => {
+      await c.workerEval(`chrome.windows.update(${window.id},{focused:true})`);
+      await page.bringToFront();
+      await until(() => page.evaluate(() => document.hasFocus()));
+    };
+    return await fn({
+      async seed(sentinel) {
+        await focus();
+        await page.evaluate((text) => navigator.clipboard.writeText(text), sentinel);
+        return page.evaluate(() => navigator.clipboard.readText());
+      },
+      async read() {
+        await focus();
+        return page.evaluate(() => navigator.clipboard.readText());
+      },
+    });
+  } finally {
+    if (window) await c.workerEval(`chrome.windows.remove(${window.id})`).catch(() => {});
+    // A socket the browser opened ahead of a request would hold close open until Node's request timeout.
+    const closed = new Promise((resolve) => server.close(resolve));
+    server.closeAllConnections();
+    await closed;
+  }
+}
+
 export async function createFixtures(c) {
   c.stage = 'fixture windows';
   const initial = await c.workerEval('chrome.windows.getAll()');
   c.windows = [];
-  for (let i = 0; i < 14; i++)
-    c.windows.push(
-      await c.workerEval(
-        `chrome.windows.create({url:${JSON.stringify(c.base + '/?name=' + (i === 0 ? 'Source' : 'Window' + i))},focused:true,type:'normal',width:800,height:600,left:0,top:0})`,
-      ),
+  // Each window and tab is created once Vivaldi's UI shows the one before.
+  for (let i = 0; i < 14; i++) {
+    const w = await c.workerEval(
+      `chrome.windows.create({url:${JSON.stringify(c.base + '/?name=' + (i === 0 ? 'Source' : 'Window' + i))},focused:true,type:'normal',width:800,height:600,left:0,top:0})`,
     );
+    await c.vivaldiHosts(w.tabs[0]);
+    c.windows.push(w);
+  }
   c.source = c.windows[0].tabs[0];
   c.other = await c.workerEval(
     `chrome.tabs.create({windowId:${c.source.windowId},url:${JSON.stringify(c.base + '/?name=Other')},active:false})`,
   );
+  await c.vivaldiHosts(c.other);
+  // Pinned by update: Vivaldi ignores pinned at creation.
   c.audio = await c.workerEval(
-    `chrome.tabs.create({windowId:${c.source.windowId},url:${JSON.stringify(c.base + '/?name=Audio')},active:false,pinned:true})`,
+    `chrome.tabs.create({windowId:${c.source.windowId},url:${JSON.stringify(c.base + '/?name=Audio')},active:false}).then((t)=>chrome.tabs.update(t.id,{pinned:true}))`,
   );
+  await c.vivaldiHosts(c.audio);
   // Tabs the harness did not open, such as the welcome tab, would add rows to every list.
   let strays = 0;
   const close = async (tabs) => {
@@ -88,11 +138,15 @@ export async function createFixtures(c) {
     const gone = () => c.workerEval(`chrome.windows.get(${w.id}).then(()=>false,()=>true)`);
     if (!(await until(gone, 2000).catch(() => false))) c.retainedWindows.push(w.id);
   }
-  const fixtureWindows = new Set(c.windows.map((w) => w.id));
-  const own = new Set([...c.windows.map((w) => w.tabs[0].id), c.other.id, c.audio.id]);
-  await close(
-    (await c.workerEval('chrome.tabs.query({})')).filter((t) => fixtureWindows.has(t.windowId) && !own.has(t.id)),
-  );
+  // A retained browser window's existing tabs also belong to the baseline; later extras in any window do not.
+  const retained = (await c.workerEval('chrome.tabs.query({})')).filter((t) => c.retainedWindows.includes(t.windowId));
+  c.fixtureTabs = new Set([
+    ...c.windows.map((w) => w.tabs[0].id),
+    c.other.id,
+    c.audio.id,
+    ...retained.map((t) => t.id),
+  ]);
+  await close(await c.strayTabs());
   await pause(350);
   c.stage = 'window focus';
   await c.recentOrder();
