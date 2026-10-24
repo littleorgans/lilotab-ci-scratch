@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Chrome } from './chrome.mjs';
 import { Evidence, scrub } from './support.mjs';
 import { lookScenarios } from './look.mjs';
-import { behaviorScenarios, state, probe } from './behavior.mjs';
+import { behaviorScenarios, thrown } from './behavior.mjs';
 import { motionScenarios } from './motion.mjs';
 import { journeyScenarios } from './journeys.mjs';
 import { contractScenarios } from './contracts.mjs';
@@ -65,15 +65,7 @@ try {
           reset = await c.reset();
           result = await fn();
         } catch (err) {
-          result = {
-            pass: false,
-            harnessError: scrub(err.message),
-            measured: {
-              error: scrub(err.message),
-              lastHost: c.last ? await state(c, c.last) : null,
-              probe: c.last ? await probe(c, c.last) : null,
-            },
-          };
+          result = await thrown(c, err);
         }
         return {
           ...result,

@@ -568,7 +568,8 @@ export class Chrome {
   }
   // Opens a list from `tab` (the fixture source by default) by shortcut or toolbar and returns its host handle once
   // the host listens; with `shown` (default) also once the list shows. `flavor` is the expected host, `listSurface`
-  // the setting, so a fallback opens the popup from an overlay setting.
+  // the setting, so a fallback opens the popup from an overlay setting. `beforePress` runs after the window and page
+  // setup, which would undo page state such as fullscreen, and before the press.
   async open(
     flavor,
     {
@@ -582,6 +583,7 @@ export class Chrome {
       reduceMotion = 'never',
       osReduce = false,
       freeze = [],
+      beforePress,
       ...settings
     } = {},
   ) {
@@ -604,6 +606,7 @@ export class Chrome {
       await this.resetProbe(this.overlay, freeze);
     }
     this.popupDefaults = { freeze, osReduce, theme };
+    await beforePress?.();
     const invocation = via === 'toolbar' ? await this.toolbar(tab.id) : await this.command(tab.id);
     let h = this.overlay;
     if (flavor === 'overlay' && !main) {
