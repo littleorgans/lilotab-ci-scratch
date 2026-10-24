@@ -8,7 +8,8 @@ export interface Candidate {
   url: string;
   useRank: number | null; // global recency, 0 most recent; null = never activated
   windowRank: number; // window recency; 0 is the source window, so it also settles the current window tie
-  barIndex: number; // tab bar position in its window
+  barIndex: number; // tab bar position in its window; a recently closed row's place, most recent first
+  closed: boolean; // a recently closed tab (C-SRCH-27)
 }
 
 // Explicit and locale free, so results match on every machine: compatibility decompose, drop marks, lower case.
@@ -40,12 +41,13 @@ function byRecency(a: Candidate, b: Candidate): number {
   return use(a) - use(b) || a.windowRank - b.windowRank || a.barIndex - b.barIndex;
 }
 
-// An empty query lists every row in tie order (C-SRCH-08).
+// An empty query lists every open row in tie order (C-SRCH-08); recently closed rows join only a typed query, after
+// the open rows of their tier, since they are never used and their window ranks last (C-SRCH-27).
 export function rank(query: string, candidates: readonly Candidate[]): readonly RowRef[] {
   const q = words(query);
   return candidates
     .flatMap((c) => {
-      const t = q.length ? tier(q, c) : 0;
+      const t = q.length ? tier(q, c) : c.closed ? null : 0;
       return t === null ? [] : [{ c, t }];
     })
     .sort((a, b) => a.t - b.t || byRecency(a.c, b.c))

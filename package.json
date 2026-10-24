@@ -3,6 +3,10 @@
   "displayName": "Lilotab",
   "version": "0.0.0",
   "description": "Keyboard driven tab switcher.",
+  "homepage": "https://github.com/littleorgans/lilotab",
+  "bugs": {
+    "url": "https://github.com/littleorgans/lilotab/issues"
+  },
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",

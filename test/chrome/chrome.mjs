@@ -1,40 +1,31 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import puppeteer from 'puppeteer-core';
-import { Browser, install } from '@puppeteer/browsers';
-import { pause, until, scrub } from './support.mjs';
-import { fixtureServer, createFixtures } from './fixtures.mjs';
+import { abandoned, closedAs, pause, until, scrub, within } from './support.mjs';
+import { BrowserProcess, installChrome } from './browser.mjs';
+import { fixtureServer, createFixtures, ScenarioFixtures } from './fixtures.mjs';
 import { installProbe, inspectPanel, readProbe } from './probe.mjs';
-import { SWITCH_COMMAND } from '../../src/worker/names.ts';
+import { SEARCH_COMMAND, SWITCH_COMMAND } from '../../src/worker/names.ts';
+import { MODIFIER_BITS, keyEvents } from '../key-input.ts';
 
-export const CHROME_BUILD = '156.0.8078.47';
-// The switch command's suggested shortcut on this platform (manifest.config.ts: Command+E on macOS, Ctrl+Shift+E
-// elsewhere) as the pages show it, and its held key as CDP and DOM key input.
+// The switch command's suggested shortcut on this platform (manifest.config.ts: Command+E on macOS, Alt+Q elsewhere)
+// as the pages show it, and its held key as CDP and DOM key input.
 const mac = process.platform === 'darwin';
-const SHORTCUT_TEXT = mac ? 'Cmd+E' : 'Ctrl+Shift+E';
+const SHORTCUT_TEXT = mac ? 'Cmd+E' : 'Alt+Q';
 export const HELD = mac
-  ? { key: 'Meta', code: 'MetaLeft', keyCode: 91, modifier: 4, flag: 'metaKey' }
-  : { key: 'Control', code: 'ControlLeft', keyCode: 17, modifier: 2, flag: 'ctrlKey' };
-// Assigned where the browser leaves the suggested shortcut unset (Edge owns Ctrl+Shift+E): the same held key with a
-// key the Chromium browsers leave free.
-const SIMULATED_SHORTCUT = 'Ctrl+Shift+9';
+  ? { key: 'Meta', modifier: MODIFIER_BITS.meta, flag: 'metaKey' }
+  : { key: 'Alt', modifier: MODIFIER_BITS.alt, flag: 'altKey' };
+// Assigned where the browser leaves the suggested shortcut unset: the same held key (Ctrl is Cmd on macOS in a
+// command binding) with a key the Chromium browsers leave free.
+const SIMULATED_SHORTCUT = mac ? 'Ctrl+Shift+9' : 'Alt+Shift+9';
+// Vivaldi's bundled UI extension and its browser window page.
+const VIVALDI_EXTENSION = 'chrome-extension://mpognobbkildjkofajifpdfhcoklimli/';
+const VIVALDI_UI = `${VIVALDI_EXTENSION}window.html`;
 const probeSource = `(${installProbe.toString()})()`;
-// Harness profile processes as `pid ppid command` on Windows, which has no pgrep or ps; PowerShell filters by the
-// profile path, read from the environment to avoid quoting it.
-const windowsProfileProcesses = (profile) =>
-  execFileSync(
-    'powershell',
-    [
-      '-NoProfile',
-      '-Command',
-      'Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:HARNESS_PROFILE) } | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)" }',
-    ],
-    { encoding: 'utf8', env: { ...process.env, HARNESS_PROFILE: profile } },
-  )
-    .split(/\r?\n/)
-    .filter(Boolean);
+// Opera's extension renderer, which also runs the worker, crashes when an action popup opens within a few hundred ms of
+// the last one closing (up to 250 ms on Windows); its worker target then stays listed and never answers. In Opera no
+// toolbar press or command comes sooner than this after a popup closes; other browsers keep fast reopens.
+const POPUP_SETTLE_MS = 1000;
 export class Chrome {
   constructor(options, evidence) {
     Object.assign(this, options);
@@ -43,6 +34,7 @@ export class Chrome {
     this.instrumented = new Set();
     this.observers = [];
     this.shortcutText = SHORTCUT_TEXT;
+    this.scenario = new ScenarioFixtures(this);
   }
   // Called with every session the harness attaches (page, popup or worker) before its domains are enabled.
   observe(fn) {
@@ -54,43 +46,23 @@ export class Chrome {
   // `stage` names the setup step in progress, so a failed setup reports where it stopped.
   async start() {
     this.stage = 'launch';
-    // Fetches the pinned Chrome for Testing into the cache once; later runs reuse it offline.
-    const installed = this.chrome
-      ? { executablePath: this.chrome }
-      : await install({ browser: Browser.CHROME, buildId: CHROME_BUILD, cacheDir: this.cache });
-    if (!fs.existsSync(installed.executablePath)) throw new Error('Chrome executable missing; check --chrome');
+    const executablePath = await installChrome({ chrome: this.chrome, cache: this.cache });
+    // Opera reports a Chrome/ version, so its executable name identifies it.
+    this.opera = path.basename(executablePath).toLowerCase().startsWith('opera');
     this.server = await fixtureServer();
     this.base = `http://127.0.0.1:${this.server.address().port}`;
-    this.profile = fs.mkdtempSync(path.join(this.e.out, 'profile-'));
-    this.browser = await puppeteer.launch({
-      executablePath: installed.executablePath,
-      userDataDir: this.profile,
-      headless: true,
-      enableExtensions: true,
-      pipe: true,
-      defaultViewport: null,
-      args: [
-        `--load-extension=${this.ext}`,
-        `--disable-extensions-except=${this.ext}`,
-        '--enable-unsafe-extension-debugging',
-        '--no-sandbox',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--screen-info={1920x1080}',
-        '--window-size=1440,900',
-        '--autoplay-policy=no-user-gesture-required',
-        '--mute-audio',
-        '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost',
-        // Puppeteer's defaults too, stated so no browser reaches the OS keychain or password store.
-        '--use-mock-keychain',
-        '--password-store=basic',
-      ],
-    });
-    this.pid = this.browser.process().pid;
-    this.browser.process().stderr?.on('data', (s) => {
-      fs.appendFileSync(path.join(this.e.out, 'browser.log'), scrub(s));
-    });
+    this.process = new BrowserProcess(this.e.out);
+    this.browser = await this.process.launch(executablePath);
     this.root = await this.browser.target().createCDPSession();
+    // Every protocol command, any session's, passes the connection's _rawSend (puppeteer internal); one from work the
+    // scenario bound abandoned is refused, so that work cannot act on a later scenario's state when it wakes.
+    const connection = this.root.connection(),
+      send = connection._rawSend;
+    if (typeof send !== 'function') throw new Error('Puppeteer connection has no _rawSend to refuse abandoned work');
+    connection._rawSend = function (...args) {
+      if (abandoned()) return Promise.reject(new Error(`Refused ${args[1]}: its scenario was cut off by the bound`));
+      return send.apply(this, args);
+    };
     this.pageBoots = [];
     const autoAttach = {
       autoAttach: true,
@@ -102,6 +74,9 @@ export class Chrome {
       parent.on('Target.attachedToTarget', async ({ sessionId, targetInfo, waitingForDebugger }) => {
         const session = this.root.connection().session(sessionId);
         if (!session) return;
+        const attachedAt = Date.now();
+        // Chrome exposes a new extension popup as other before it becomes page.
+        const probed = targetInfo.type === 'page' || targetInfo.type === 'other';
         try {
           if (targetInfo.type === 'tab') {
             watch(session);
@@ -110,23 +85,31 @@ export class Chrome {
               filter: [{ type: 'page' }, { exclude: true }],
             });
           }
-          // Chrome exposes a new extension popup as other before it becomes page.
-          if (targetInfo.type === 'page' || targetInfo.type === 'other') {
+          if (probed) {
             const defaults = this.popupDefaults ?? { freeze: [], osReduce: false, theme: 'dark' };
             const source = `${probeSource};__h1.freeze=${JSON.stringify(defaults.freeze)};`;
-            await this.notify(session, 'page');
-            await session.send('Page.enable');
-            await session.send('Runtime.enable');
-            await this.emulate(session, defaults.osReduce, defaults.theme);
-            await session.send('Page.addScriptToEvaluateOnNewDocument', { source });
-            const observed = await session.send('Runtime.evaluate', {
-              expression: `${source};({ready:document.readyState,panelAlreadyMounted:!!document.querySelector('.panel'),at:performance.now()})`,
-              returnByValue: true,
-            });
+            // A paused target may answer nothing until it runs: Edge's PDF guest view also arrives here as other, and
+            // has no renderer before then. So every command goes out at once with the resume last, and the session
+            // keeps their order: the probe and media are in place before the target's first script, no answer is
+            // awaited while it is paused, and a popup spends no round trip of the worker's 500 ms host deadline
+            // (C-POP-05). `setupMs` records when the answers arrived.
+            const [, , , , , observed] = await Promise.all([
+              this.notify(session, 'page'),
+              session.send('Page.enable'),
+              session.send('Runtime.enable'),
+              this.emulate(session, defaults.osReduce, defaults.theme),
+              session.send('Page.addScriptToEvaluateOnNewDocument', { source }),
+              session.send('Runtime.evaluate', {
+                expression: `${source};({ready:document.readyState,panelAlreadyMounted:!!document.querySelector('.panel'),at:performance.now()})`,
+                returnByValue: true,
+              }),
+              session.send('Runtime.runIfWaitingForDebugger'),
+            ]);
             this.pageBoots.push({
               targetId: targetInfo.targetId,
               type: targetInfo.type,
               waitingForDebugger,
+              setupMs: Date.now() - attachedAt,
               ...observed.result.value,
             });
             this.instrumented.add(targetInfo.targetId);
@@ -134,7 +117,7 @@ export class Chrome {
         } catch (e) {
           this.problems.push({ kind: 'pageProbe', error: scrub(e.message) });
         } finally {
-          await session.send('Runtime.runIfWaitingForDebugger').catch(() => {});
+          if (!probed) await session.send('Runtime.runIfWaitingForDebugger').catch(() => {});
         }
       });
     watch(this.root);
@@ -145,8 +128,15 @@ export class Chrome {
       ...autoAttach,
       filter: [{ type: 'other' }, { exclude: true }],
     });
+    if (this.opera)
+      this.browser.on('targetdestroyed', (t) => {
+        if (this.isPopup(t)) this.popupClosedAt = Date.now();
+      });
     this.manifest = JSON.parse(fs.readFileSync(path.join(this.ext, 'manifest.json')));
     this.stage = 'extension load';
+    // Installs the build after the watchers attach, so its welcome tab is observed. --disable-extensions-except would
+    // keep it disabled in branded Chrome; the fresh profile has no other unpacked extension.
+    await this.root.send('Extensions.loadUnpacked', { path: this.ext });
     const callbacks = await this.attachWorker();
     const inventory = [];
     const collect = (dir) => {
@@ -169,14 +159,14 @@ export class Chrome {
     this.e.metadata = {
       node: process.version,
       browser: await this.browser.version(),
-      executable: installed.executablePath,
+      executable: executablePath,
       extension: this.ext,
       manifestSha256: createHash('sha256')
         .update(fs.readFileSync(path.join(this.ext, 'manifest.json')))
         .digest('hex'),
       buildSha256: createHash('sha256').update(JSON.stringify(inventory)).digest('hex'),
       commandCallbacks: callbacks,
-      pid: this.pid,
+      pid: this.process.pid,
       started: new Date().toISOString(),
     };
     this.e.limits.push(
@@ -200,6 +190,7 @@ export class Chrome {
     this.e.limits.push(
       'A targeted source page press can leave a real headless toolbar popup focused. That case minimizes and restores the source browser window to generate native window blur, and labels the observation as a substitute. Native OS toolbar outside dismissal remains unverified.',
     );
+    this.vivaldi = this.browser.targets().some((t) => t.url().startsWith(VIVALDI_EXTENSION));
     await this.simulateShortcut();
     await this.fixtures();
   }
@@ -252,9 +243,12 @@ export class Chrome {
       10000,
     );
     await this.workerEval(probeSource);
+    // The observer runs after the product's onConnect listener, which disconnects a refused port (05 4.3); adding a
+    // listener to that port throws into the event dispatch, a worker console entry JY-9 would count. It records the
+    // port in `closedPorts` instead.
     await this.workerEval(`(()=>{
-      const p=__h1;p.messages=[];
-      const observe=port=>{port.onMessage.addListener(m=>{if(m.t==='input'||m.t==='ready')p.messages.push({at:performance.now(),wall:Date.now(),t:m.t,input:m.input??null})});return port};
+      const p=__h1;p.messages=[];p.closedPorts=[];
+      const observe=port=>{try{port.onMessage.addListener(m=>{if(m.t==='input'||m.t==='ready')p.messages.push({at:performance.now(),wall:Date.now(),t:m.t,input:m.input??null})})}catch{p.closedPorts.push({wall:Date.now()})}return port};
       const connect=chrome.tabs.connect.bind(chrome.tabs);chrome.tabs.connect=(...args)=>observe(connect(...args));
       chrome.runtime.onConnect.addListener(observe);
       p.focusRequests=[];const update=chrome.windows.update.bind(chrome.windows);
@@ -301,12 +295,13 @@ export class Chrome {
   workerEval(expression) {
     return this.eval(this.worker, expression);
   }
-  async command(tabId = this.source.id) {
+  async command(tabId = this.source.id, name = SWITCH_COMMAND) {
+    await this.popupSettled();
     const r = await this.worker.send('Runtime.callFunctionOn', {
       objectId: this.commandListener,
       functionDeclaration:
-        'async function(id){const tab=await chrome.tabs.get(id);const wall=Date.now();this("flip-tab",tab);return {wall}}',
-      arguments: [{ value: tabId }],
+        'async function(id,name){const tab=await chrome.tabs.get(id);const wall=Date.now();this(name,tab);return {wall}}',
+      arguments: [{ value: tabId }, { value: name }],
       awaitPromise: true,
       returnByValue: true,
     });
@@ -315,10 +310,6 @@ export class Chrome {
   }
   fixtures() {
     return createFixtures(this);
-  }
-  // The fixture's recent order in the source window: Source, then Audio, then Other.
-  async recentOrder() {
-    for (const id of [this.other.id, this.audio.id, this.source.id]) await this.focus(id);
   }
   // A new tab reports an empty url until its navigation commits, so each poll rereads it.
   async pageFor(tabId) {
@@ -338,11 +329,35 @@ export class Chrome {
     );
     const page = await this.pageFor(id);
     await page.bringToFront();
-    await until(() => page.evaluate(() => document.hasFocus()));
+    await until(() => this.focused(page));
     return page;
   }
+  // Whether the page's document, or a guest view it embeds, has focus. Edge shows a PDF in a guest view, a `webview`
+  // target under the page, and the outer document does not report focus held there.
+  async focused(page) {
+    if (await page.evaluate(() => document.hasFocus())) return true;
+    const { targetInfos } = await this.root.send('Target.getTargets');
+    const parent = targetInfos.find((t) => t.type === 'page' && t.url === page.url());
+    for (const guest of targetInfos.filter((t) => t.type === 'webview' && t.parentId === parent?.targetId)) {
+      const { sessionId } = await this.root.send('Target.attachToTarget', { targetId: guest.targetId, flatten: true });
+      try {
+        if (await this.eval(this.root.connection().session(sessionId), 'document.hasFocus()')) return true;
+      } finally {
+        await this.root.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      }
+    }
+    return false;
+  }
+  isPopup(t) {
+    return t.url().startsWith(this.extensionBase + 'src/hosts/popup/index.html#');
+  }
   popupTargets() {
-    return this.browser.targets().filter((t) => t.url().startsWith(this.extensionBase + 'src/hosts/popup/index.html#'));
+    return this.browser.targets().filter((t) => this.isPopup(t));
+  }
+  // In Opera, waits out POPUP_SETTLE_MS since a popup last closed, before anything that can open one.
+  async popupSettled() {
+    const wait = (this.popupClosedAt ?? -Infinity) + POPUP_SETTLE_MS - Date.now();
+    if (wait > 0) await pause(wait);
   }
   popupTarget() {
     return this.popupTargets()[0];
@@ -353,16 +368,52 @@ export class Chrome {
     const targets = await this.root.send('Target.getTargets', { filter: [{ type: 'tab' }, { exclude: true }] });
     const info = targets.targetInfos.find((t) => t.url === page.url());
     if (!info) throw new Error('Fixture CDP tab target absent');
+    await this.popupSettled();
     const wall = await this.workerEval('Date.now()');
-    await this.root.send('Extensions.triggerAction', { id: this.extensionId, targetId: info.targetId });
+    // Vivaldi has no Chromium toolbar: Extensions.triggerAction crashes its browser process, so the press makes the
+    // call its own toolbar button makes.
+    if (this.vivaldi) {
+      const { windowId } = await this.workerEval(`chrome.tabs.get(${tabId})`);
+      await this.eval(
+        await until(() => this.vivaldiUi(windowId)),
+        `new Promise((resolve,reject)=>vivaldi.extensionActionUtils.executeExtensionAction(${JSON.stringify(this.extensionId)},${windowId},()=>chrome.runtime.lastError?reject(new Error(chrome.runtime.lastError.message)):resolve(true)))`,
+      );
+    } else await this.root.send('Extensions.triggerAction', { id: this.extensionId, targetId: info.targetId });
     return { wall };
+  }
+  // The session of Vivaldi's UI page drawing the window, once that page is up; null before.
+  async vivaldiUi(windowId) {
+    this.vivaldiWindows ??= new Map();
+    this.vivaldiTargets ??= new Set();
+    if (!this.vivaldiWindows.has(windowId))
+      for (const t of this.browser.targets()) {
+        if (t.url() !== VIVALDI_UI || this.vivaldiTargets.has(t)) continue;
+        const s = await t.createCDPSession();
+        const id = await this.eval(s, 'chrome.windows.getCurrent().then((w)=>w.id)').catch(() => null);
+        if (id === null) {
+          await s.detach().catch(() => {});
+          continue;
+        }
+        this.vivaldiTargets.add(t);
+        this.vivaldiWindows.set(id, s);
+      }
+    return this.vivaldiWindows.get(windowId) ?? null;
+  }
+  // Vivaldi's UI page can miss a tab that opened before the page was up: it then adds an active start page tab in its
+  // place and never shows the tab. In Vivaldi, waits until the tab's window page shows it.
+  async vivaldiHosts({ id, windowId }) {
+    if (!this.vivaldi) return;
+    await until(async () => {
+      const ui = await this.vivaldiUi(windowId);
+      return ui && this.eval(ui, `!!document.getElementById('tab-${id}')`);
+    }, 5000);
   }
   // Gives the tab the activeTab grant a real shortcut press gives, through one toolbar click; the popup closes again.
   async grant(tabId = this.source.id) {
     await this.focus(tabId);
     await this.toolbar(tabId);
-    const popup = await until(() => this.popupTarget(), 4000);
-    await this.closePopup(popup);
+    // Vivaldi's action.openPopup always rejects (Vivaldi bug VB-120122), so no popup follows its press.
+    if (!this.vivaldi) await this.closePopup(await until(() => this.popupTarget(), 4000));
     await pause(100);
     await this.focus(tabId);
   }
@@ -435,10 +486,7 @@ export class Chrome {
     return this.own(
       h,
       `(()=>{const p=globalThis.__h1;p.animations=[];p.events=[];p.freeze=${JSON.stringify(freeze)};return true})()`,
-    ).catch((e) => {
-      if (/closed|detached/i.test(e.message)) return false;
-      throw e;
-    });
+    ).catch(closedAs(false));
   }
   async resume(h) {
     await this.own(
@@ -446,73 +494,39 @@ export class Chrome {
       '(()=>{const p=__h1;p.freeze=[];for(const a of p.paused.splice(0))if(a.playState==="paused")a.play();return true})()',
     ).catch(() => {});
   }
-  async key(h, key, mods = 0, up = true) {
-    const codes = {
-      ArrowDown: 40,
-      ArrowUp: 38,
-      ArrowRight: 39,
-      ArrowLeft: 37,
-      Enter: 13,
-      Escape: 27,
-      Backspace: 8,
-      Tab: 9,
-      f: 70,
-    };
-    const code = key.length === 1 ? 'Key' + key.toUpperCase() : key;
+  async key(h, key, modifiers = 0) {
     try {
-      await h.s.send('Input.dispatchKeyEvent', {
-        type: 'keyDown',
-        key,
-        code,
-        modifiers: mods,
-        windowsVirtualKeyCode: codes[key] ?? key.toUpperCase().charCodeAt(0),
-      });
-      if (up)
-        await h.s.send('Input.dispatchKeyEvent', {
-          type: 'keyUp',
-          key,
-          code,
-          modifiers: mods,
-          windowsVirtualKeyCode: codes[key] ?? key.toUpperCase().charCodeAt(0),
-        });
+      for (const event of keyEvents(key, { modifiers })) await h.s.send('Input.dispatchKeyEvent', event);
       return { sent: true };
     } catch (e) {
-      if (/closed|detached/i.test(e.message)) return { sent: false, reason: 'Host already closed' };
-      throw e;
+      return closedAs({ sent: false, reason: 'Host already closed' })(e);
     }
   }
+  // Types letters as real key presses that carry text, unlike Input.insertText, so a page listener could see them.
+  async type(h, text) {
+    for (const key of text)
+      for (const event of keyEvents(key, { text: key })) await h.s.send('Input.dispatchKeyEvent', event);
+  }
   release(h) {
-    return h.s
-      .send('Input.dispatchKeyEvent', {
-        type: 'keyUp',
-        key: HELD.key,
-        code: HELD.code,
-        modifiers: 0,
-        windowsVirtualKeyCode: HELD.keyCode,
-      })
-      .catch((e) => {
-        if (/closed|detached/i.test(e.message)) return { sent: false, reason: 'Host already closed' };
-        throw e;
-      });
+    const [event] = keyEvents(HELD.key, { phase: 'up' });
+    return h.s.send('Input.dispatchKeyEvent', event).catch(closedAs({ sent: false, reason: 'Host already closed' }));
   }
   async click(h, x, y) {
     await h.s.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
     await h.s.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
   }
-  async waitRemoved(h) {
+  async waitRemoved(h, ms = 1000) {
     return until(async () => {
-      try {
-        const panel = await this.inspect(h);
-        return !panel.connected && panel;
-      } catch (e) {
-        if (/closed|detached/i.test(e.message)) return { connected: false };
-        throw e;
-      }
-    }, 1000);
+      const panel = await this.inspect(h).catch(closedAs({ connected: false }));
+      return !panel.connected && panel;
+    }, ms);
   }
+  // Esc with search text only clears it (K-30), so a list still there gets a second Esc.
   async cancel(h) {
     if (!h) return;
     await this.resume(h);
+    await this.key(h, 'Escape').catch(() => {});
+    if (await this.waitRemoved(h, 300).catch(() => null)) return;
     await this.key(h, 'Escape').catch(() => {});
     await this.waitRemoved(h);
   }
@@ -544,6 +558,7 @@ export class Chrome {
     const next = JSON.stringify({
       version: 1,
       quickTap: 'list',
+      quickScope: 'window',
       listSurface: 'overlay',
       theme: 'dark',
       textSize: 'default',
@@ -566,9 +581,11 @@ export class Chrome {
     if (changed === 'timeout') throw new Error('Settings change never reached the worker');
     await pause(45);
   }
-  // Opens a list from `tab` (the fixture source by default) by shortcut or toolbar and returns its host handle once
+  // Opens a list from `tab` (the fixture source by default) by shortcut, toolbar or the Search tabs command (`via`
+  // 'search') and returns its host handle once
   // the host listens; with `shown` (default) also once the list shows. `flavor` is the expected host, `listSurface`
-  // the setting, so a fallback opens the popup from an overlay setting.
+  // the setting, so a fallback opens the popup from an overlay setting. `beforePress` runs after the window and page
+  // setup, which would undo page state such as fullscreen, and before the press.
   async open(
     flavor,
     {
@@ -582,6 +599,7 @@ export class Chrome {
       reduceMotion = 'never',
       osReduce = false,
       freeze = [],
+      beforePress,
       ...settings
     } = {},
   ) {
@@ -604,7 +622,11 @@ export class Chrome {
       await this.resetProbe(this.overlay, freeze);
     }
     this.popupDefaults = { freeze, osReduce, theme };
-    const invocation = via === 'toolbar' ? await this.toolbar(tab.id) : await this.command(tab.id);
+    await beforePress?.();
+    const invocation =
+      via === 'toolbar'
+        ? await this.toolbar(tab.id)
+        : await this.command(tab.id, via === 'search' ? SEARCH_COMMAND : SWITCH_COMMAND);
     let h = this.overlay;
     if (flavor === 'overlay' && !main) {
       h = { s: await page.createCDPSession(), page, flavor };
@@ -628,10 +650,12 @@ export class Chrome {
           ),
         2000,
       ).catch(() => null);
-      if (!initialMedia || initialMedia.initial !== osReduce || initialMedia.panelAlreadyMounted)
+      if (!initialMedia || initialMedia.initial !== osReduce || initialMedia.panelAlreadyMounted) {
+        const closed = (await this.workerEval('__h1.closedPorts')).filter((x) => x.wall >= invocation.wall).length;
         throw new Error(
-          `Popup startup media was not observed with the requested value before renderer construction; observed ${JSON.stringify(initialMedia ?? null)}`,
+          `Popup startup media was not observed with the requested value before renderer construction; observed ${JSON.stringify(initialMedia ?? null)}; ports the worker closed since the press: ${closed}`,
         );
+      }
       await this.media(h, osReduce, theme);
       await this.own(h, `__h1.freeze=${JSON.stringify(freeze)}`);
       this.e.metadata.popupMode = 'Real toolbar popup via chrome.action.openPopup, normal worker handshake';
@@ -688,65 +712,30 @@ export class Chrome {
   workerMessages() {
     return this.workerEval('__h1.messages');
   }
+  // Whether the worker still evaluates, within the time any healthy evaluation takes.
+  answers() {
+    return within(5000, () => this.workerEval('true')).catch(() => false);
+  }
   // Every chrome.windows.update call with focused true since the worker attached; headless reports every window
   // focused, so a journey observes the request.
   focusRequests() {
     return this.workerEval('__h1.focusRequests');
   }
-  async audibleFixture(enabled) {
-    if (enabled)
-      return this.workerEval(
-        `(()=>{const native=chrome.windows.getAll;__h1.originalGetAll=native;chrome.windows.getAll=async(...args)=>{const windows=await native(...args);return windows.map(w=>({...w,tabs:w.tabs?.map(t=>({...t,audible:t.id===${this.audio.id}}))}))};return true})()`,
-      );
-    return this.workerEval(
-      '(()=>{chrome.windows.getAll=__h1.originalGetAll;delete __h1.originalGetAll;return true})()',
-    );
-  }
   async stop() {
     if (this.browser) await this.browser.close();
     if (this.server) await new Promise((resolve) => this.server.close(resolve));
-    let alive = false;
-    try {
-      process.kill(this.pid, 0);
-      alive = true;
-    } catch {
-      // ESRCH: the browser process is gone.
-    }
-    await pause(100);
-    let remaining = [],
-      processCheckError = null;
-    // pgrep matches the profile path in each command line, so output scales with harness processes, never the whole
-    // machine; pgrep exits 1 when none match, ps exits 1 when a listed pid has exited since.
-    const run = (cmd, args) => {
-      try {
-        return execFileSync(cmd, args, { encoding: 'utf8' });
-      } catch (err) {
-        if (err.status === 1) return err.stdout;
-        throw err;
-      }
+    const exit = (await this.process?.exited()) ?? {
+      alive: false,
+      remaining: [],
+      processCheckError: 'Browser never launched',
     };
-    try {
-      if (process.platform === 'win32') remaining = windowsProfileProcesses(this.profile);
-      else {
-        const pids = run('pgrep', ['-f', this.profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')]).trim();
-        if (pids)
-          remaining = run('ps', ['-o', 'pid=,ppid=,command=', '-p', pids.split('\n').join(',')])
-            .split('\n')
-            .filter(Boolean);
-      }
-    } catch (err) {
-      processCheckError = scrub(err.message);
-    }
     this.e.write('browser-shutdown.json', {
-      pid: this.pid,
-      alive,
-      remaining,
-      processCheckError,
+      ...exit,
       profileRetained: true,
       problems: this.problems,
       instrumentedPages: this.instrumented.size,
       pageBoots: this.pageBoots,
     });
-    return !alive && remaining.length === 0 && !processCheckError;
+    return !exit.alive && exit.remaining.length === 0 && !exit.processCheckError;
   }
 }

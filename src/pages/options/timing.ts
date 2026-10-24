@@ -12,7 +12,8 @@ import {
   type TimingRecord,
 } from '../../browser/timing.ts';
 import { PRODUCT } from '../../strings.ts';
-import { el, group, row } from '../dom.ts';
+import { el, group, hint, row } from '../dom.ts';
+import { segmented } from './segmented.ts';
 
 const RECENT = 30; // table rows, newest first
 
@@ -28,6 +29,8 @@ const TEXT = {
   empty: 'No gestures yet.',
   columns: ['Time', 'Host', 'Page', 'Delay', 'Ready', 'Input', 'Dwell', 'Shown', 'Outcome'],
 } as const;
+
+export const TIMING_HEADING = TEXT.heading; // the ninth group, after About and in the side index
 
 const STYLE = `
 .timing-rows { display: block; overflow-x: auto; padding: 8px 10px; }
@@ -110,32 +113,22 @@ function download(records: readonly TimingRecord[]): void {
   }, 10_000);
 }
 
-function switchControl(set: (on: boolean) => void): { node: HTMLElement; show: (on: boolean) => void } {
-  const inputs = [true, false].map((value) => {
-    const input = el('input', { type: 'radio', name: 'timing', value: String(value) });
-    input.addEventListener('change', () => {
-      set(value);
-    });
-    return input;
-  });
-  const options = inputs.map((input, n) => el('label', { class: 'option' }, [input, n === 0 ? TEXT.on : TEXT.off]));
-  const node = el('fieldset', { 'aria-labelledby': 'label-timing' }, [el('div', { class: 'track' }, options)]);
-  return {
-    node,
-    show(on) {
-      for (const input of inputs) input.checked = input.value === String(on);
-    },
-  };
-}
-
 export function timingGroup(): HTMLElement {
   let state: TimingState = { on: true, records: [] };
-  const toggle = switchControl((on) => {
-    const write = on
-      ? chrome.storage.local.remove(TIMING_OFF_KEY)
-      : chrome.storage.local.set({ [TIMING_OFF_KEY]: true });
-    void write.catch(() => undefined);
-  });
+  const toggle = segmented(
+    'timing',
+    [
+      [true, TEXT.on],
+      [false, TEXT.off],
+    ],
+    'label-timing',
+    (on) => {
+      const write = on
+        ? chrome.storage.local.remove(TIMING_OFF_KEY)
+        : chrome.storage.local.set({ [TIMING_OFF_KEY]: true });
+      void write.catch(() => undefined);
+    },
+  );
   const status = el('p', { class: 'hint' });
   const recent = el('div', { class: 'row timing-rows' });
   const exportButton = el('button', { type: 'button' }, [TEXT.export]);
@@ -162,9 +155,13 @@ export function timingGroup(): HTMLElement {
   refresh();
 
   document.head.append(el('style', {}, [STYLE]));
-  return group(TEXT.heading, [
-    row(TEXT.record, [el('p', { class: 'hint' }, [TEXT.kept])], toggle.node, 'label-timing'),
-    row(TEXT.log, [status], el('div', { class: 'timing-actions' }, [exportButton, clear])),
-    recent,
-  ]);
+  return group(
+    TEXT.heading,
+    [
+      row(TEXT.record, [hint(TEXT.kept)], toggle.node, 'label-timing'),
+      row(TEXT.log, [status], el('div', { class: 'timing-actions' }, [exportButton, clear])),
+      recent,
+    ],
+    'timing',
+  );
 }

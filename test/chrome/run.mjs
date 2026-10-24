@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Chrome } from './chrome.mjs';
 import { Evidence, scrub } from './support.mjs';
 import { lookScenarios } from './look.mjs';
-import { behaviorScenarios, state, probe } from './behavior.mjs';
+import { behaviorScenarios, thrown } from './behavior.mjs';
 import { motionScenarios } from './motion.mjs';
 import { journeyScenarios } from './journeys.mjs';
 import { contractScenarios } from './contracts.mjs';
@@ -34,6 +34,8 @@ if (fs.existsSync(out) && fs.readdirSync(out).length) {
 }
 const e = new Evidence(out);
 const c = new Chrome({ ext, cache: path.join(root, '.smoke/browsers'), chrome: option('--chrome') }, e);
+// Four times the slowest scenario on any matrix cell (AC-03-welcome-once, under 8 s).
+e.bound = { ms: 30000, answers: () => c.answers(), restore: () => c.scenario.clean({ recover: true }) };
 const scenarios = [];
 const add = (id, expected, fn) => scenarios.push({ id, expected, fn });
 lookScenarios(c, e, add);
@@ -60,21 +62,18 @@ try {
     for (const { id, expected, fn } of scenarios.filter((s) => !option('--only') || s.id.includes(option('--only')))) {
       await e.scenario(id, expected, async () => {
         const offset = (await c.workerMessages()).length;
-        let result, reset;
+        let result, reset, failure;
         try {
           reset = await c.reset();
           result = await fn();
         } catch (err) {
-          result = {
-            pass: false,
-            harnessError: scrub(err.message),
-            measured: {
-              error: scrub(err.message),
-              lastHost: c.last ? await state(c, c.last) : null,
-              probe: c.last ? await probe(c, c.last) : null,
-            },
-          };
+          failure = err;
         }
+        // Before thrown, as the scenario's own finally blocks were; the scenario's error outranks the cleanup's.
+        await c.scenario.clean().catch((err) => {
+          failure ??= err;
+        });
+        if (failure) result = await thrown(c, failure);
         return {
           ...result,
           ...(reset && Object.keys(reset).length ? { reset } : {}),
@@ -89,9 +88,11 @@ try {
   } catch (err) {
     e.write('cleanup-error.txt', scrub(err.stack));
   }
+  // Shutdown reports what the browser left, whether or not it stopped answering.
+  e.bound = null;
   await e.scenario('shutdown', 'Owned Chrome and all processes using its unique disposable profile exit', () => ({
     pass: clean,
-    measured: { clean, profile: c.profile },
+    measured: { clean, profile: c.process?.profile },
     artifacts: ['browser-shutdown.json'],
   }));
   e.flush();

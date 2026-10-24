@@ -30,10 +30,10 @@ build:
     cd dist && zip -qrX -FS ../{{ zip }} .
     @echo {{ zip }}
 
-# Measurement build into dist/, unzipped: the release build plus the gesture timing log, read and exported on the
-# options page. Never ship it.
+# Measurement build into dist-timing/, unzipped: the release build plus the gesture timing log, read and exported on
+# the options page. Its own folder, so `just build` never overwrites it. Never ship it.
 build-timing:
-    {{ vp }} build --mode timing
+    {{ vp }} build --mode timing --outDir dist-timing
 
 # Release build, then the headless Chrome harness over dist/; output in .smoke/runs/<UTC time>, nonzero exit on any FAIL.
 # Fetches the pinned Chrome for Testing into .smoke/browsers on first use. Diagnose with --only <scenario id substring>;
@@ -53,7 +53,11 @@ typecheck:
 test:
     {{ vp }} test
 
+# Fail when a tracked path is neither allowlisted nor private for publishing; public snapshots have no publish/ and skip it
+classify:
+    [ ! -f publish/cli.mjs ] || node publish/cli.mjs check
+
 # The strict check is a body line, so `&&` runs typecheck, test and build after it
 # Everything CI runs, checking without fixing; the workflow calls only this recipe
-ci: install && typecheck test build
+ci: classify install && typecheck test build
     {{ vp }} check

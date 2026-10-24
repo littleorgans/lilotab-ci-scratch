@@ -19,7 +19,7 @@ import { readSettings, storeSettings, type SettingsRead } from '../settings/inde
 import { diagnostic, type BootId, type LiveFacts, type Millis } from '../types.ts';
 import { TIMER_KINDS, emit, setInteraction, setRecents, type Run } from './run.ts';
 import { onBrowser, onExpiry, onInput, onPress, onStatus } from './rows.ts';
-import type { CoreEvent, Model, Step, TimerKind } from './types.ts';
+import type { CoreEvent, Interaction, Model, Step, TimerKind } from './types.ts';
 
 export * from './types.ts';
 
@@ -42,25 +42,42 @@ export function init(boot: BootId, stored: unknown, settings: unknown, live: Liv
   reportSettings(run, read);
   if (read.source === 'migrated') emit(run, { kind: 'saveSettings', settings: storeSettings(read.settings) });
   if (live) setRecents(run, reconcile(envelope.recents, live)); // C-REC-09
+  emit(run, { kind: 'showBadge', on: read.settings.tabCountBadge === 'on' }); // C-SET-27
   return { model: run.model, effects: run.effects };
 }
 
-// Every live due at or before at expires first, earliest first, each through its own row (04 3).
-function expire(run: Run, at: Millis): void {
+// Every live due at or before at expires first, earliest first, each through its own row (04 3). Returns the timers
+// fired, in order.
+function expire(run: Run, at: Millis): TimerKind[] {
+  const fired: TimerKind[] = [];
   for (;;) {
     const i = run.model.interaction;
-    if (!i) return;
+    if (!i) return fired;
     let timer: TimerKind | null = null;
     for (const kind of TIMER_KINDS) {
       const due = i.due[kind];
       if (due !== null && due <= at && (timer === null || due < (i.due[timer] ?? Infinity))) timer = kind;
     }
-    if (timer === null) return;
+    if (timer === null) return fired;
     const due = i.due[timer] ?? at;
     const next = { ...i, due: { ...i.due, [timer]: null } };
     setInteraction(run, next);
+    fired.push(timer);
     onExpiry(run, next, timer, due);
   }
+}
+
+// The expiry phase of a step at at, alone: the slot the event's row sees (the same interaction, or null when an expiry
+// row ended it) and the timers fired on the way. Effects are discarded; model is never changed.
+export interface Expiry {
+  interaction: Interaction | null;
+  fired: readonly TimerKind[];
+}
+
+export function expiry(model: Model, at: Millis): Expiry {
+  const run: Run = { model, effects: [] };
+  const fired = expire(run, at);
+  return { interaction: run.model.interaction, fired };
 }
 
 // Recents first: every tab and window event updates recents before its interaction row (04 4.1).
@@ -83,6 +100,7 @@ function handle(run: Run, e: CoreEvent): void {
   switch (e.kind) {
     case 'command':
     case 'toolbarClicked':
+    case 'searchCommand':
       onPress(run, e);
       break;
     case 'hostStatus':
@@ -106,6 +124,8 @@ function handle(run: Run, e: CoreEvent): void {
       // T-53: from the next interaction; a live one keeps its binding, look, snapshot and dues
       const read = readSettings(e.settings);
       reportSettings(run, read);
+      const badge = read.settings.tabCountBadge;
+      if (badge !== run.model.settings.tabCountBadge) emit(run, { kind: 'showBadge', on: badge === 'on' }); // C-SET-27
       run.model = { ...run.model, settings: read.settings };
       break;
     }
@@ -114,6 +134,7 @@ function handle(run: Run, e: CoreEvent): void {
   }
 }
 
+// Exactly expire then handle, so step(m, e) equals handle over expiry(m, e.at); keep any new work after expire.
 export function step(model: Model, event: CoreEvent): Step {
   const run: Run = { model, effects: [] };
   expire(run, event.at);

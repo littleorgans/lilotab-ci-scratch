@@ -1,6 +1,7 @@
 // Shared builders for the host side core tables (07-tests TB-10 to TB-12): key facts, bindings and a start view.
 
 import { DEFAULTS, lookOf, type Binding, type KeyFacts, type ListRow, type StartView } from '../src/core/index.ts';
+import { codeOf } from './key-input.ts';
 
 type Held = Binding['held'];
 
@@ -14,20 +15,12 @@ export const binding = (held: Held, key: string, shift = false): Binding => ({
 export const CMD_E = binding('meta', 'E'); // macOS default
 export const CTRL_SHIFT_E = binding('ctrl', 'E', true);
 
-const CODES: Readonly<Record<string, string>> = {
-  ' ': 'Space',
-  Meta: 'MetaLeft',
-  Control: 'ControlLeft',
-  Alt: 'AltLeft',
-};
-
 // A trusted keydown with no modifiers; `key` alone also sets a matching `code` for letters and named keys.
 export function keyFacts(key: string, over: Partial<KeyFacts> = {}): KeyFacts {
-  const code = CODES[key] ?? (/^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : key);
   return {
     type: 'keydown',
     key,
-    code,
+    code: codeOf(key),
     meta: false,
     ctrl: false,
     alt: false,
@@ -57,7 +50,7 @@ export const startView = (over: Partial<StartView> = {}): StartView => ({
   binding: CMD_E,
   quickTap: 'flip',
   look: lookOf(DEFAULTS),
-  view: { windows: [{ current: 0, rows: [row('Source'), row('Second'), row('Third')] }] },
-  frame: { mode: 'hold', visible: true, open: false, window: 0, row: 0 },
+  view: { windows: [{ current: 0, rows: [row('Source'), row('Second'), row('Third')] }], closed: [] },
+  frame: { mode: 'hold', visible: true, open: false, window: 0, row: 0, gone: [], copy: null },
   ...over,
 });
