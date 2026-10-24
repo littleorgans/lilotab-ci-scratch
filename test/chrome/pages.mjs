@@ -75,7 +75,9 @@ export function pageScenarios(c, e, add) {
           ),
       );
     }
-  // The binding as installed, before any harness substitute: a clash with a browser shortcut leaves it unset.
+  // The binding as installed, before any harness substitute: a clash with a browser shortcut leaves it unset. Chromium
+  // never auto assigns a suggested key that is a browser accelerator; Edge and Opera on Windows and Linux bind
+  // Ctrl+Shift+E, so this fails there until the ruled per browser default is built.
   add('AC-26-shortcut-default', 'The switch command installs with its suggested shortcut set (C-KEY-01)', () => ({
     pass: !!c.installedShortcut,
     measured: { installed: c.installedShortcut, simulated: c.e.metadata.shortcutSimulated ?? null },
