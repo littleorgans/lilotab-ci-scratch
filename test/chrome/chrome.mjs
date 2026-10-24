@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import diagnostics from 'node:diagnostics_channel';
 import puppeteer from 'puppeteer-core';
 import { Browser, install } from '@puppeteer/browsers';
 import { pause, until, scrub } from './support.mjs';
@@ -62,6 +63,22 @@ export class Chrome {
     this.server = await fixtureServer();
     this.base = `http://127.0.0.1:${this.server.address().port}`;
     this.profile = fs.mkdtempSync(path.join(this.e.out, 'profile-'));
+    // browser.log takes the browser's stderr and exit from spawn, so a browser that dies during launch still leaves
+    // its output, exit code and signal. The launch's first child process is the browser; its stdio exists once spawn
+    // returns.
+    const log = path.join(this.e.out, 'browser.log');
+    const capture = ({ process: child }) => {
+      queueMicrotask(() => {
+        diagnostics.unsubscribe('child_process', capture);
+        child.stderr?.on('data', (s) => {
+          fs.appendFileSync(log, scrub(s));
+        });
+        child.once('exit', (code, signal) => {
+          fs.appendFileSync(log, `browser exited: code ${code}, signal ${signal}\n`);
+        });
+      });
+    };
+    diagnostics.subscribe('child_process', capture);
     this.browser = await puppeteer.launch({
       executablePath: installed.executablePath,
       userDataDir: this.profile,
@@ -87,9 +104,6 @@ export class Chrome {
       ],
     });
     this.pid = this.browser.process().pid;
-    this.browser.process().stderr?.on('data', (s) => {
-      fs.appendFileSync(path.join(this.e.out, 'browser.log'), scrub(s));
-    });
     this.root = await this.browser.target().createCDPSession();
     this.pageBoots = [];
     const autoAttach = {

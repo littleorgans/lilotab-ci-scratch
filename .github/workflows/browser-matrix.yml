@@ -4,6 +4,17 @@ name: browser matrix
 # check: each cell writes one job summary line and uploads its run folder.
 on:
   workflow_dispatch:
+    inputs:
+      browser:
+        description: Browser to smoke
+        type: choice
+        default: all
+        options: [all, cft-pinned, cft-148, chrome, edge, brave, opera, vivaldi]
+      os:
+        description: Runner OS
+        type: choice
+        default: all
+        options: [all, ubuntu-latest, windows-latest]
   push:
     branches: [main]
     # Only what changes the built extension or the harness run; docs and unit test pushes skip.
@@ -50,9 +61,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(inputs.os && inputs.os != 'all' && format('["{0}"]', inputs.os) || '["ubuntu-latest", "windows-latest"]') }}
         # cft-pinned is the harness's CHROME_BUILD; cft-148 is the manifest's minimum_chrome_version.
-        browser: [cft-pinned, cft-148, chrome, edge, brave, opera, vivaldi]
+        browser: ${{ fromJSON(inputs.browser && inputs.browser != 'all' && format('["{0}"]', inputs.browser) || '["cft-pinned", "cft-148", "chrome", "edge", "brave", "opera", "vivaldi"]') }}
     defaults:
       run:
         shell: bash
