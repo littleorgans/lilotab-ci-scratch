@@ -62,6 +62,9 @@ export function createTabs(): TabsAdapter {
         results?.((at) => ({ kind: 'activated', at, op, target, result }));
       });
     },
+    remove(tabId) {
+      chrome.tabs.remove(tabId).catch(() => undefined);
+    },
     // Every listener of 05-events 3.1 for tabs and windows; tabs.onUpdated is deliberately absent (05 3.2).
     onEvent(sink) {
       results = sink;

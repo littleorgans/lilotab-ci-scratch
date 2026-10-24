@@ -1,67 +1,82 @@
-// Options page: edits settings through the core settings rules and sends the clear request (03-components 3.3).
+// Options page: one page with a side index and one card per group (C-SET-26); edits settings through the core
+// settings rules (03-components 3.3).
 
 import '../page.css';
 import { loadSettings, onSettingsChanged, saveSettings } from '../../browser/settings.ts';
 import {
-  CLEAR_ANSWER_MS,
   DEFAULTS,
-  FIELDS,
-  FLIP_ONLY,
+  GROUPS,
   IDLE_EDIT,
-  PROTOCOL,
   SCHEMA,
   canEdit,
   editStep,
-  inactive,
-  parseOptionsReply,
+  shownOf,
   type EditInput,
-  type OptionsRequest,
   type SettingField,
+  type SettingGroup,
   type Settings,
   type SettingsEdit,
 } from '../../core/index.ts';
-import { OPTIONS_TEXT as T, SETTING_TEXT } from '../../strings.ts';
-import { el, group, row } from '../dom.ts';
+import { OPTIONS_TEXT as T, SHORTCUT_TEXT } from '../../strings.ts';
+import { SEARCH_COMMAND, SWITCH_COMMAND } from '../../worker/names.ts';
+import { el, group } from '../dom.ts';
 import { shortcutBlock } from '../shortcut.ts';
-import { timingGroup } from './timing.ts';
+import { aboutRows } from './about.ts';
+import { keysRow } from './keys.ts';
+import { privacyRows } from './privacy.ts';
+import { renderRows, settingRows } from './rows.ts';
+import { TIMING_HEADING, timingGroup } from './timing.ts';
 
 // The settings edit value; every change goes through step, which renders and performs the core's effects.
 let edit: SettingsEdit = IDLE_EDIT;
-const controls = new Map<SettingField, { line: HTMLElement; set: HTMLFieldSetElement }>();
+// Include recently closed tabs holds the optional sessions permission (C-SET-29, C-PERM-05).
+const SESSIONS: chrome.permissions.Permissions = { permissions: ['sessions'] };
 
 const newer = el('p', { class: 'notice', hidden: '' }, [T.newer]);
-const saveStatus = el('p', { class: 'status', role: 'status' });
 const restore = el('button', { type: 'button' }, [T.restore]);
-const flipOnly = el('p', { class: 'hint', hidden: '' }, [T.flipOnly]);
+const saveStatus = new Map<SettingGroup, HTMLElement>();
 
-// A projection of the edit value; disabled until the first read and over newer data (C-DATA-10). Open tab list
-// leaves the Flip to last tab rows in place, dimmed and out of the tab order (C-SET-19).
+// A projection of the edit value; disabled until the first read and over newer data (C-DATA-10).
 function render(e: SettingsEdit): void {
-  document.documentElement.className = e.shown.theme; // the page follows Theme (C-SET-06)
-  for (const [field, { line, set }] of controls) {
-    const off = inactive(e.shown, field);
-    line.classList.toggle('off', off);
-    set.disabled = !canEdit(e) || off;
-    for (const input of set.querySelectorAll('input')) input.checked = input.value === String(e.shown[field]);
-  }
+  const shown = shownOf(e);
+  document.documentElement.className = shown.theme; // the page follows Theme (C-SET-06)
+  renderRows(shown, canEdit(e));
   restore.disabled = !canEdit(e);
-  flipOnly.hidden = !FLIP_ONLY.some((f) => inactive(e.shown, f));
   newer.hidden = e.source !== 'newer';
-  saveStatus.textContent = e.status === 'saveFailed' ? T.saveFailed : ''; // C-SET-18
+  for (const [g, status] of saveStatus) {
+    status.textContent = e.status === 'saveFailed' && g === e.group ? T.saveFailed : ''; // C-SET-18
+  }
 }
 
 // One validated object, one write; the core decides rollback and readback for a rejected save (06 4.6, C-SET-18).
+// The permission request runs in this call, inside the click's user gesture: nothing before it may defer (C-SET-29).
 function step(input: EditInput): void {
   const next = editStep(edit, input);
   edit = next.edit;
   render(edit);
   for (const effect of next.effects) {
-    if (effect.kind === 'write') {
-      void saveSettings(effect.stored).catch(() => {
-        step({ kind: 'failed', write: effect.write });
-      });
-    } else {
-      read();
+    switch (effect.kind) {
+      case 'write':
+        void saveSettings(effect.stored).catch(() => {
+          step({ kind: 'failed', write: effect.write });
+        });
+        break;
+      case 'read':
+        read();
+        break;
+      case 'requestSessions':
+        void chrome.permissions.request(SESSIONS).then(
+          (ok) => {
+            step({ kind: 'asked', result: ok ? 'granted' : 'denied' });
+          },
+          () => {
+            step({ kind: 'asked', result: 'failed' });
+          },
+        );
+        break;
+      case 'removeSessions':
+        void chrome.permissions.remove(SESSIONS).catch(() => undefined);
+        break;
     }
   }
 }
@@ -76,75 +91,77 @@ function read(): void {
   );
 }
 
-// One segmented control per SCHEMA field: a fieldset of radios sharing the field's name, so arrow keys move and the
-// row is one tab stop. Its values come only from SCHEMA, its names and unit from the catalogue (06 4.1).
-function settingRow(field: SettingField): HTMLElement {
-  const { label, unit } = SETTING_TEXT[field];
-  const names: Readonly<Record<string, string>> = SETTING_TEXT[field].values;
-  const values: readonly Settings[SettingField][] = SCHEMA[field].values;
-  const options = values.map((v) => {
-    const input = el('input', { type: 'radio', name: field, value: String(v) });
-    input.addEventListener('change', () => {
-      step({ kind: 'edit', patch: { [field]: v } });
-    });
-    return el('label', { class: 'option' }, [input, names[String(v)] ?? String(v)]);
-  });
-  const labelId = `label-${field}`;
-  const set = el('fieldset', { 'aria-labelledby': labelId }, [el('div', { class: 'track' }, options)]);
-  if (unit !== undefined) {
-    set.setAttribute('aria-describedby', `unit-${field}`);
-    set.append(el('span', { class: 'unit', id: `unit-${field}` }, [unit]));
-  }
-  const line = row(label, field === 'quickTap' ? [flipOnly] : [], set, labelId);
-  controls.set(field, { line, set });
-  return line;
-}
-
-// FIELDS order is the page order.
-const settingsGroup = (section: 'switching' | 'appearance'): HTMLElement =>
-  group(
-    T.sections[section],
-    FIELDS.filter((f) => SCHEMA[f].section === section).map((f) => settingRow(f)),
+// Whether the sessions permission is held, as a fact for the core; a failed check changes nothing (C-SET-29).
+function readSessions(): void {
+  void chrome.permissions.contains(SESSIONS).then(
+    (held) => {
+      step({ kind: 'sessions', held });
+    },
+    () => undefined,
   );
+}
 
-// "Clear now": one request, answered when the cleared history saves; silence past 5 s reads as not cleared (06 5.3).
-function historyRow(): HTMLElement {
-  const button = el('button', { type: 'button' }, [T.clear]);
+// One edit from a control; the core asks for the permission on closed tabs On (C-SET-29).
+function choose(field: SettingField, value: Settings[SettingField]): void {
+  step({ kind: 'edit', patch: { [field]: value }, group: SCHEMA[field].section });
+}
+
+// Writes { version } (C-SET-11, 06 4.2).
+restore.addEventListener('click', () => {
+  step({ kind: 'edit', patch: DEFAULTS, group: 'privacy' });
+});
+
+// Rows that are not stored settings, after each group's setting rows (C-SET intro).
+const FIXED: Partial<Record<SettingGroup, () => Node[]>> = {
+  shortcuts: () => {
+    const keys = keysRow();
+    return [
+      shortcutBlock({
+        command: SWITCH_COMMAND,
+        label: SHORTCUT_TEXT.switchLabel,
+        needsModifier: true,
+        suggested: true,
+        onRead: keys.onRead,
+      }),
+      shortcutBlock({
+        command: SEARCH_COMMAND,
+        label: SHORTCUT_TEXT.searchLabel,
+        needsModifier: false,
+        suggested: false,
+      }),
+      keys.row,
+    ];
+  },
+  privacy: () => privacyRows(restore),
+  about: aboutRows,
+};
+
+// The group's card with its save failure line under it; the anchor id is the group in kebab case (quick-tap).
+function settingsGroup(g: SettingGroup): HTMLElement {
   const status = el('p', { class: 'status', role: 'status' });
-  button.addEventListener('click', () => {
-    button.disabled = true;
-    status.textContent = T.clearing;
-    const request: OptionsRequest = { v: PROTOCOL, t: 'clear' };
-    const silence = new Promise<null>((resolve) => setTimeout(resolve, CLEAR_ANSWER_MS, null));
-    void Promise.race([chrome.runtime.sendMessage(request), silence])
-      .then(parseOptionsReply, () => null)
-      .then((reply) => {
-        status.textContent = reply?.ok === true ? T.cleared : T.notCleared; // C-DATA-09
-        button.disabled = false;
-      });
-  });
-  return row(T.history, [el('p', { class: 'hint' }, [T.historyKept]), status], button);
+  saveStatus.set(g, status);
+  const id = g.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+  const section = group(T.groups[g], [...settingRows(g, choose), ...(FIXED[g]?.() ?? [])], id);
+  section.append(status);
+  return section;
 }
 
-function restoreRow(): HTMLElement {
-  // Writes { version } (C-SET-11, 06 4.2).
-  restore.addEventListener('click', () => {
-    step({ kind: 'edit', patch: DEFAULTS });
-  });
-  return row(T.defaults, [el('p', { class: 'hint' }, [T.restoreScope])], restore);
-}
+const sections: readonly (readonly [label: string, node: HTMLElement])[] = [
+  ...GROUPS.map((g) => [T.groups[g], settingsGroup(g)] as const),
+  // Inline, so release builds drop it (src/browser/timing.ts).
+  ...(import.meta.env.MODE === 'timing' ? [[TIMING_HEADING, timingGroup()] as const] : []),
+];
 
 document.title = T.title;
 document.body.append(
-  el('main', {}, [
+  el('div', { class: 'layout' }, [
     el('h1', {}, [T.title]),
-    newer,
-    el('section', { class: 'card' }, [shortcutBlock()]),
-    settingsGroup('switching'),
-    saveStatus,
-    settingsGroup('appearance'),
-    group(T.sections.history, [historyRow(), restoreRow()]),
-    ...(import.meta.env.MODE === 'timing' ? [timingGroup()] : []), // inline, so release builds drop it (src/browser/timing.ts)
+    el(
+      'nav',
+      { class: 'index', 'aria-label': T.index },
+      sections.map(([label, node]) => el('a', { href: `#${node.id}` }, [label])),
+    ),
+    el('main', {}, [newer, ...sections.map(([, node]) => node)]),
   ]),
 );
 
@@ -152,5 +169,8 @@ document.body.append(
 onSettingsChanged((raw) => {
   step({ kind: 'read', raw });
 });
+chrome.permissions.onAdded.addListener(readSessions);
+chrome.permissions.onRemoved.addListener(readSessions);
 render(edit);
 read();
+readSessions();

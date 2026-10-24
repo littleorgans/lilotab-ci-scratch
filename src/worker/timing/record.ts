@@ -11,12 +11,14 @@ import type {
   TimingRecord,
 } from '../../browser/timing.ts';
 import {
+  expiry,
   isWebStore,
   urlParts,
   type AttemptId,
   type CoreEvent,
   type DeclineReason,
   type Effect,
+  type Expiry,
   type HostInput,
   type Interaction,
   type Millis,
@@ -25,7 +27,7 @@ import {
   type TimerKind,
 } from '../../core/index.ts';
 
-type Press = Extract<CoreEvent, { kind: 'command' | 'toolbarClicked' }>;
+type Press = Extract<CoreEvent, { kind: 'command' | 'toolbarClicked' | 'searchCommand' }>;
 type CloseHost = Extract<Effect, { kind: 'closeHost' }>;
 type Pending = Omit<GestureRecord, 'outcome' | 'switched' | 'reason' | 'end'>;
 
@@ -76,17 +78,24 @@ const INPUT_CLASS: Readonly<Record<HostInput['kind'], InputClass>> = {
   pick: 'pointer',
   ping: 'other',
   activity: 'other',
+  jump: 'key',
+  page: 'key',
+  close: 'key',
   cancel: 'other',
 };
 
 const tenth = (ms: number): number => Math.round(ms * 10) / 10;
-const isPress = (e: CoreEvent): e is Press => e.kind === 'command' || e.kind === 'toolbarClicked';
-const isPending = (i: Interaction) => i.state === 'overlayPending' || i.state === 'popupPending';
+const isPress = (e: CoreEvent): e is Press =>
+  e.kind === 'command' || e.kind === 'toolbarClicked' || e.kind === 'searchCommand';
 
-function inputReason(prev: Interaction, input: HostInput, dwellExpired: boolean): EndReason {
+// The timer whose expiry row ended the gesture; dwell never does (T-13, T-14).
+const TIMER_END: Readonly<Record<TimerKind, EndReason>> = { dwell: 'other', hostDeadline: 'deadline', idle: 'idle' };
+
+// seen is the interaction the event's row saw, after expiry.
+function inputReason(seen: Interaction, input: HostInput): EndReason {
   switch (input.kind) {
     case 'release':
-      if (prev.state === 'ready' && !dwellExpired) return 'quickTap';
+      if (seen.state === 'ready') return 'quickTap';
       return input.inferred ? 'inferredRelease' : 'release';
     case 'cancel':
       return input.cause;
@@ -99,14 +108,15 @@ function inputReason(prev: Interaction, input: HostInput, dwellExpired: boolean)
 }
 
 // The event that ended the gesture, when no timer did.
-function reasonOf(prev: Interaction, event: CoreEvent, dwellExpired: boolean): EndReason {
+function reasonOf(seen: Interaction, event: CoreEvent): EndReason {
   switch (event.kind) {
     case 'host':
-      return inputReason(prev, event.input, dwellExpired);
+      return inputReason(seen, event.input);
     case 'hostStatus':
       return event.status === 'closed' ? 'hostClosed' : 'hostFailed';
     case 'command':
     case 'toolbarClicked':
+    case 'searchCommand':
       return 'newPress';
     case 'windowFocused':
       return 'focusLoss';
@@ -170,18 +180,22 @@ export function createGestureLog(origin: number, done: (record: TimingRecord) =>
     return g;
   }
 
-  // One step of the live gesture g; prev is its interaction before the step, cur the slot after it.
-  function observe(g: Open, prev: Interaction, cur: Interaction | null, event: CoreEvent, step: Step, at: Millis) {
+  // One step of the live gesture g; prev is its interaction before the step, cur the slot after it, and the core's
+  // expiry phase (04 3) gives seen, the slot the event's row saw, and the timers fired before it.
+  function observe(
+    g: Open,
+    prev: Interaction,
+    cur: Interaction | null,
+    event: CoreEvent,
+    step: Step,
+    at: Millis,
+    { interaction: seen, fired }: Expiry,
+  ) {
     const r = g.record;
     const off = (t: Millis) => tenth(t - g.at);
-    // The core expires every due at or before the event's at first (04 3).
-    const expired = (timer: TimerKind) => {
-      const due = prev.due[timer];
-      return due !== null && due <= event.at;
-    };
-    const deadline = expired('hostDeadline') && isPending(prev);
-    if (expired('dwell')) r.dwell ??= off(at);
-    if (deadline) r.deadline = off(at);
+    const ended = seen ? undefined : fired.at(-1); // an expiry row ended the gesture
+    if (fired.includes('dwell')) r.dwell ??= off(at);
+    if (ended === 'hostDeadline') r.deadline = off(at);
     if (event.kind === 'hostStatus') {
       const a = g.attempts.get(event.attempt);
       if (a && event.status === 'ready') a.ready ??= off(event.at);
@@ -192,8 +206,7 @@ export function createGestureLog(origin: number, done: (record: TimingRecord) =>
       event.kind === 'host' &&
       event.attempt === prev.attempt.id &&
       event.input.kind !== 'ping' &&
-      !deadline &&
-      !expired('idle')
+      seen !== null
     ) {
       const { input } = event;
       r.input ??= {
@@ -212,7 +225,7 @@ export function createGestureLog(origin: number, done: (record: TimingRecord) =>
       if (e.kind === 'render' && (e.frame.mode === 'search' || e.frame.visible)) r.shown ??= off(at);
     }
     if (cur?.id === prev.id) {
-      if (cur.state === 'holding' || cur.state === 'search') r.shown ??= off(at); // toolbar search shows at ready
+      if (cur.state === 'holding' || cur.state === 'search') r.shown ??= off(at); // a search entry shows at ready
       return;
     }
     const close = step.effects.find((e): e is CloseHost => e.kind === 'closeHost' && e.attempt === prev.attempt.id);
@@ -220,7 +233,7 @@ export function createGestureLog(origin: number, done: (record: TimingRecord) =>
       ...r,
       outcome: close?.outcome ?? 'cancel',
       switched: step.effects.some((e) => e.kind === 'activate'),
-      reason: deadline ? 'deadline' : expired('idle') ? 'idle' : reasonOf(prev, event, expired('dwell')),
+      reason: ended ? TIMER_END[ended] : seen ? reasonOf(seen, event) : 'other',
       end: off(at),
     });
     open = null;
@@ -258,7 +271,7 @@ export function createGestureLog(origin: number, done: (record: TimingRecord) =>
       const prev = before.interaction;
       const cur = after.model.interaction;
       if (open && prev?.id !== open.id) open = null; // lost track, as after recording was off
-      if (open && prev) observe(open, prev, cur, event, after, at);
+      if (open && prev) observe(open, prev, cur, event, after, at, expiry(before, event.at));
       if (cur && cur.id !== prev?.id && isPress(event)) open = begin(cur, event, before, at);
     },
     live: () => open !== null,

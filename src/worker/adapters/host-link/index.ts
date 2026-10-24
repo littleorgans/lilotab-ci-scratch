@@ -16,6 +16,7 @@ import {
   type StartView,
 } from '../../../core/index.ts';
 import { reportCode } from '../../diagnostics.ts';
+import { clock } from '../clock/index.ts';
 import { POPUP_PAGE } from '../../names.ts';
 import { timing } from '../../timing/index.ts';
 
@@ -23,6 +24,7 @@ interface Attempt {
   host: 'overlay' | 'popup';
   tabId: number;
   start: StartView;
+  dwell: Millis | null; // the dwell due, overlay only: a visible popup page keeps the worker's timer on time
   phase: ChannelPhase;
   port: chrome.runtime.Port | null;
 }
@@ -78,7 +80,8 @@ export function createHostLink(overlayFile: string): HostLink {
     return { kind: 'hostStatus', at, attempt, status: m.t === 'ready' ? 'ready' : 'declined' };
   }
 
-  // Binds a port to its attempt and sends the start view as the channel's first message.
+  // Binds a port to its attempt and sends the start view as the channel's first message. The wake is the time left to
+  // the dwell due as it posts, so injection time counts (05-events 2.3, 4.5).
   function open(attempt: AttemptId, a: Attempt, port: chrome.runtime.Port): void {
     a.port = port;
     port.onMessage.addListener((raw) => {
@@ -93,7 +96,8 @@ export function createHostLink(overlayFile: string): HostLink {
         return now?.port === port ? end(attempt, now, at) : null;
       });
     });
-    port.postMessage({ t: 'start', start: a.start });
+    const wake = a.dwell === null ? null : Math.max(0, a.dwell - clock.now());
+    port.postMessage({ t: 'start', start: a.start, wake });
   }
 
   function clearPopup(tabId: number, attempt: AttemptId): void {
@@ -143,14 +147,14 @@ export function createHostLink(overlayFile: string): HostLink {
   }
 
   return {
-    mountOverlay(attempt, tabId, start) {
-      live.set(attempt, { host: 'overlay', tabId, start, phase: 'opening', port: null });
+    mountOverlay(attempt, tabId, start, dwell) {
+      live.set(attempt, { host: 'overlay', tabId, start, dwell, phase: 'opening', port: null });
       inject(attempt, tabId).catch(() => {
         status(attempt, 'failed');
       });
     },
     openPopup(attempt, tabId, windowId, start) {
-      live.set(attempt, { host: 'popup', tabId, start, phase: 'opening', port: null });
+      live.set(attempt, { host: 'popup', tabId, start, dwell: null, phase: 'opening', port: null });
       launchPopup(attempt, tabId, windowId).catch(() => {
         status(attempt, 'failed');
       });

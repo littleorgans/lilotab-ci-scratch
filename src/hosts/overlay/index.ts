@@ -1,7 +1,7 @@
 // Overlay host: the self contained file the host link injects into frame 0 (03-components 3.3, 05-events 4.2, 5).
 // On evaluation it registers one runtime.onConnect listener per isolated world and does nothing else.
 
-import { parsePortName, type DeclineReason } from '../../core/protocol/index.ts';
+import { parsePortName, type DeclineReason, type HostMode } from '../../core/protocol/index.ts';
 import { createListSurface } from '../list-view/index.ts';
 import { runSession, type Host, type Mounted, type Session } from '../session/index.ts';
 
@@ -48,12 +48,20 @@ function declineReason(): DeclineReason | null {
   return FOCUS_TAKERS.includes(document.activeElement?.localName ?? '') ? 'frameFocus' : null;
 }
 
+// Keyboard extensions cannot see the field inside the closed root, only the host as the focused element. Marked
+// editable while the field is, they leave typing to it; plaintext-only allows no rich edits on the host itself.
+const editable = (host: HTMLElement) => {
+  host.contentEditable = 'plaintext-only';
+};
+
 // A closed shadow root keeps titles from page script (C-HOLD-20); a div cannot be upgraded by a page's custom element.
-function mountOverlay(): Mounted {
+// A search start (the Search tabs command, C-KEY-12) is editable from the first paint, which focuses the field.
+function mountOverlay(mode: HostMode): Mounted {
   const prior = document.activeElement;
   const host = document.createElement('div');
   host.setAttribute('popover', 'manual');
   host.style.cssText = HOST_STYLE;
+  if (mode === 'search') editable(host);
   const root = host.attachShadow({ mode: 'closed' });
   const surface = createListSurface(root, 'overlay');
   let tookFocus = false;
@@ -88,10 +96,8 @@ function mountOverlay(): Mounted {
   return {
     surface,
     owns: (e) => e.composedPath().includes(host), // the closed root shows outside listeners only its host
-    // Keyboard extensions cannot see the field inside the closed root, only the host as the focused element. Marked
-    // editable while the field is, they leave typing to it; plaintext-only allows no rich edits on the host itself.
     latch() {
-      host.contentEditable = 'plaintext-only';
+      editable(host);
       surface.latch();
     },
     unlatch(open) {

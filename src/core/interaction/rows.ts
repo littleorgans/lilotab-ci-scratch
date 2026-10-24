@@ -3,7 +3,7 @@
 import type { HostInput } from '../protocol/index.ts';
 import { isNormal, reconcile } from '../recents/index.ts';
 import { chooseHost } from '../settings/index.ts';
-import { buildSnapshot, listedTabs, lookOf, rowAt } from '../snapshot/index.ts';
+import { buildSnapshot, listedTabs, lookOf, rowAt, rowOf } from '../snapshot/index.ts';
 import type { Millis, TabRef } from '../types.ts';
 import {
   cancel,
@@ -13,14 +13,23 @@ import {
   loadIcons,
   nextId,
   publish,
-  searchOf,
   setInteraction,
   setRecents,
   startTimer,
   startView,
-  wrap,
   type Run,
 } from './run.ts';
+import {
+  closable,
+  highlightOf,
+  holdMove,
+  moveHighlight,
+  searchMove,
+  searchOf,
+  stepCursor,
+  unlatched,
+  withGone,
+} from './selection.ts';
 import {
   HOST_DEADLINE_MS,
   type CoreEvent,
@@ -30,7 +39,7 @@ import {
   type TimerKind,
 } from './types.ts';
 
-type Press = Extract<CoreEvent, { kind: 'command' | 'toolbarClicked' }>;
+type Press = Extract<CoreEvent, { kind: 'command' | 'toolbarClicked' | 'searchCommand' }>;
 
 const sameTab = (a: TabRef, b: TabRef) => a.tabId === b.tabId && a.windowId === b.windowId;
 
@@ -38,16 +47,17 @@ const isPending = (i: Interaction) => i.state === 'overlayPending' || i.state ==
 
 // ---- presses
 
-// T-02 to T-04 and T-55: reconcile, freeze the snapshot, open attempt 1 with the start view.
+// T-02 to T-04, T-55 and T-79: reconcile, freeze the snapshot, open attempt 1 with the start view. The toolbar icon
+// always opens the popup (C-POP-09); the Search tabs command opens where the shortcut would (C-KEY-12).
 function startGesture(run: Run, e: Press): void {
-  const entry = e.kind === 'command' ? 'shortcut' : 'toolbar';
+  const entry = e.kind === 'command' ? 'shortcut' : 'search';
   if (entry === 'shortcut' && listedTabs(e.live) <= 1) return; // T-02, C-HOLD-15
   setRecents(run, reconcile(run.model.recents, e.live));
   const { settings } = run.model;
   const source = { tabId: e.source.tabId, windowId: e.source.windowId };
-  const snapshot = buildSnapshot(run.model.recents, e.live, settings, source);
+  const snapshot = buildSnapshot(run.model.recents, e.live, settings, source, e.closed);
   if (!snapshot) return;
-  const host = entry === 'toolbar' ? 'popup' : chooseHost(e.source, settings);
+  const host = e.kind === 'toolbarClicked' ? 'popup' : chooseHost(e.source, settings);
   const id = nextId(run);
   let i: Interaction = {
     id,
@@ -63,8 +73,9 @@ function startGesture(run: Run, e: Press): void {
     away: false,
     cursor: snapshot.initial,
     history: snapshot.stack !== null,
-    search: entry === 'toolbar' ? searchOf({ snapshot }, '', snapshot.initial) : null,
+    search: entry === 'search' ? searchOf({ snapshot, gone: [] }, '', snapshot.initial) : null,
     open: false,
+    gone: [],
   };
   // Open tab list has no dwell: a ready host shows the list at once (T-03, T-04, C-HOLD-24).
   if (entry === 'shortcut' && i.quickTap === 'flip') i = startTimer(run, i, 'dwell', e.at + settings.holdDelayMs);
@@ -75,28 +86,11 @@ function startGesture(run: Run, e: Press): void {
 
 function launch(run: Run, i: Interaction): void {
   const { id: attempt, host } = i.attempt;
+  const { tabId, windowId } = i.source;
   const start = startView(i);
-  if (host === 'overlay') emit(run, { kind: 'mountOverlay', attempt, tabId: i.source.tabId, start });
-  else emit(run, { kind: 'openPopup', attempt, tabId: i.source.tabId, windowId: i.source.windowId, start });
+  if (host === 'overlay') emit(run, { kind: 'mountOverlay', attempt, tabId, start, dwell: i.due.dwell });
+  else emit(run, { kind: 'openPopup', attempt, tabId, windowId, start });
 }
-
-// Within the shown window in its visible order; an arrow here ends history stepping for the hold (D6).
-const moveCursor = (i: Interaction, delta: number): Interaction => {
-  const rows = i.snapshot.windows[i.cursor.window]?.rows.length ?? 1;
-  return { ...i, history: false, cursor: { ...i.cursor, row: wrap(i.cursor.row, delta, rows) } };
-};
-
-// Shortcut presses: in history, one step along the global stack from the highlighted row, the shown window following
-// (D1, D4); else as an arrow.
-const stepCursor = (i: Interaction, delta: number): Interaction => {
-  const { stack } = i.snapshot;
-  if (!i.history || !stack) return moveCursor(i, delta);
-  const at = stack.findIndex((c) => c.window === i.cursor.window && c.row === i.cursor.row);
-  return { ...i, cursor: stack[wrap(at, delta, stack.length)] ?? i.cursor };
-};
-
-const moveHighlight = (i: Interaction, delta: number): Interaction =>
-  i.search ? { ...i, search: { ...i.search, highlight: wrap(i.search.highlight, delta, i.search.results.length) } } : i;
 
 // A press from the live interaction's tab steps it (C-KEY-04, C-HOLD-21).
 function stepPress(run: Run, i: Interaction, at: Millis): void {
@@ -104,10 +98,9 @@ function stepPress(run: Run, i: Interaction, at: Millis): void {
     if (i.entry === 'shortcut') setInteraction(run, stepCursor(i, 1)); // T-15
   } else if (i.state === 'holding') {
     publish(run, stepCursor(i, 1), at, true); // T-22
-  } else if (i.search?.results.length) {
-    publish(run, moveHighlight(i, 1), at, true); // T-37
   } else {
-    publish(run, i, at, false); // T-40
+    const moved = moveHighlight(i, 1);
+    publish(run, moved, at, moved !== i); // T-37, T-40
   }
 }
 
@@ -116,7 +109,7 @@ export function onPress(run: Run, e: Press): void {
   if (i && e.kind === 'command' && sameTab(i.source, e.source)) {
     stepPress(run, i, e.at);
   } else {
-    if (i) cancel(run, i); // T-05, T-55
+    if (i) cancel(run, i); // T-05, T-55, T-79
     startGesture(run, e);
   }
 }
@@ -145,18 +138,16 @@ function latch(run: Run, i: Interaction, at: Millis): void {
   publish(run, { ...i, state: 'search', search: searchOf(i, '', i.cursor) }, at, true);
 }
 
-// Back to hold with the held key down, as the F press itself shows: the query goes; the highlighted tab stays when the
-// shown window lists it, else the initial cursor (T-67).
+// Back to hold with the held key down, as the F press itself shows (T-67).
 function unlatch(run: Run, i: Interaction, search: SearchState, at: Millis): void {
-  const target = search.results[search.highlight];
-  show(run, { ...i, search: null, cursor: target?.window === i.cursor.window ? target : i.snapshot.initial }, at);
+  show(run, unlatched(i, search), at);
 }
 
 // ---- host status (rows naming the active attempt; others are T-51)
 
 function hostReady(run: Run, i: Interaction, at: Millis): void {
   const next = cancelTimer(run, i, 'hostDeadline');
-  if (next.entry === 'toolbar') {
+  if (next.entry === 'search') {
     publish(run, { ...next, state: 'search' }, at, false); // T-61
   } else if (next.due.dwell !== null) {
     setInteraction(run, { ...next, state: 'ready' }); // T-06, T-09
@@ -197,21 +188,16 @@ function onReadyInput(run: Run, i: Interaction, input: HostInput, at: Millis): v
   }
 }
 
-// Shown window steps, row = its current row (T-24), ending history stepping (D6); with one window nothing moves
-// (T-25, C-WIN-10).
-function stepWindow(i: Interaction, delta: number): Interaction {
-  const { windows } = i.snapshot;
-  if (windows.length < 2) return i.history ? { ...i, history: false } : i;
-  const window = wrap(i.cursor.window, delta, windows.length);
-  return { ...i, history: false, cursor: { window, row: windows[window]?.current ?? 0 } };
+// The close key: a closable row closes and leaves the list (T-74, T-75); anything else only restarts idle (T-76).
+function closeRow(run: Run, i: Interaction, at: Millis): void {
+  const target = closable(i);
+  if (!target) {
+    publish(run, i, at, false);
+    return;
+  }
+  emit(run, { kind: 'closeTab', tabId: target.tabId });
+  publish(run, withGone(i, target.ref), at, true);
 }
-
-type HoldMove = Extract<HostInput, { kind: 'step' | 'move' | 'window' }>;
-
-const holdMove = (i: Interaction, input: HoldMove): Interaction => {
-  if (input.kind === 'step') return stepCursor(i, input.delta);
-  return input.kind === 'move' ? moveCursor(i, input.delta) : stepWindow(i, input.delta);
-};
 
 function onHoldInput(run: Run, i: Interaction, input: HostInput, at: Millis): void {
   switch (input.kind) {
@@ -246,6 +232,9 @@ function onHoldInput(run: Run, i: Interaction, input: HostInput, at: Millis): vo
     case 'latchSearch': // T-31
       latch(run, i, at);
       break;
+    case 'close': // T-74, T-76
+      closeRow(run, i, at);
+      break;
     default: // ping T-73, query and leaveSearch: due.idle stays
       break;
   }
@@ -254,24 +243,31 @@ function onHoldInput(run: Run, i: Interaction, input: HostInput, at: Millis): vo
 function onSearchInput(run: Run, i: Interaction, input: HostInput, at: Millis): void {
   const search = i.search;
   if (!search) return;
-  const results = search.results.length > 0;
   switch (input.kind) {
     case 'query': // T-35
       if (input.text !== search.query) publish(run, { ...i, search: searchOf(i, input.text, null) }, at, true);
       break;
     case 'step':
     case 'move': // T-36, T-40
-      publish(run, results ? moveHighlight(i, input.delta) : i, at, results);
+    case 'jump':
+    case 'page': {
+      // T-77
+      const moved = searchMove(i, input);
+      publish(run, moved, at, moved !== i);
+      break;
+    }
+    case 'close': // T-75, T-76
+      closeRow(run, i, at);
       break;
     case 'enter': {
-      // T-38, T-40
-      const target = search.results[search.highlight];
+      // T-38, T-40, T-78
+      const target = highlightOf(search);
       if (target) commit(run, i, target);
       else publish(run, i, at, false);
       break;
     }
-    case 'pick': // T-39
-      if (rowAt(i.snapshot, input.row)) commit(run, i, input.row);
+    case 'pick': // T-39, T-78
+      if (rowOf(i.snapshot, input.row)) commit(run, i, input.row);
       break;
     case 'window': // T-42
     case 'latchSearch':
@@ -281,7 +277,7 @@ function onSearchInput(run: Run, i: Interaction, input: HostInput, at: Millis): 
     case 'cancel': // T-43, T-44
       cancel(run, i);
       break;
-    case 'leaveSearch': // T-67; a toolbar list has no hold mode, so no row
+    case 'leaveSearch': // T-67; a search entry list has no hold mode, so no row
       if (i.entry === 'shortcut') unlatch(run, i, search, at);
       break;
     default: // release T-41, ping T-45: due.idle stays

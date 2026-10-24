@@ -1,6 +1,6 @@
 /* Options and welcome pages: grouped cards, segmented controls and buttons in one set of Light and Dark tokens. The
    options page sets dark, light or system on the root from Theme (C-SET-06); the welcome page sets none, so like
-   Match system it follows prefers-color-scheme. */
+   Match system it follows prefers-color-scheme. The options page adds a side index beside its groups (C-SET-26). */
 
 :root {
   color-scheme: light dark;
@@ -19,8 +19,9 @@
   --button-edge: light-dark(rgb(0 0 0 / 12%), transparent);
   --ring: light-dark(#0a60cf, #4a94ff); /* the list's ring colours */
   --error: light-dark(#b3261e, #f2b8b5);
+  /* The pages' one text size: the title, controls and link rows below scale from it in rem. */
   font:
-    13px/1.5 system-ui,
+    15px/1.5 system-ui,
     sans-serif;
   background: var(--page);
   color: var(--text);
@@ -34,8 +35,10 @@
   color-scheme: light;
 }
 
+/* Chrome's stylesheet for extension pages sets body text to 75%; the pages' text follows the root size. */
 body {
   margin: 0;
+  font-size: inherit;
 }
 
 main {
@@ -46,9 +49,60 @@ main {
   padding: 40px 24px 48px;
 }
 
+/* Settings: the title above, the index and the groups below it, on one left edge. */
+.layout {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 640px);
+  gap: 24px 40px;
+  justify-content: center;
+  padding: 40px 24px 48px;
+}
+
+.layout > h1 {
+  grid-column: 1 / -1;
+}
+
+.layout > main {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Entries line up with the group labels: the same line height, no padding above the first. */
+.index {
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.index a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.index a:hover {
+  color: var(--text);
+}
+
+/* Narrow windows: the index sits above the groups as one wrapped line. */
+@media (width < 760px) {
+  .layout {
+    grid-template-columns: minmax(0, 640px);
+  }
+
+  .index {
+    position: static;
+    flex-flow: row wrap;
+    gap: 4px 16px;
+  }
+}
+
 h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 1.5rem;
   line-height: 1.2;
   font-weight: 600;
 }
@@ -61,6 +115,7 @@ ul {
 .group {
   display: grid;
   gap: 8px;
+  scroll-margin-top: 24px; /* an index jump leaves the label clear of the top */
 }
 
 .group > h2 {
@@ -113,7 +168,7 @@ ul {
 }
 
 .problem,
-main > .status {
+.group > .status {
   color: var(--error);
 }
 
@@ -121,8 +176,25 @@ main > .status {
   display: none;
 }
 
-main > .status {
-  margin-top: -16px;
+.group > .status {
+  padding-left: 16px;
+}
+
+/* Keys in the list: keys on the left, what they do on the right. */
+.keys {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 8px 0 0;
+}
+
+.keys dt {
+  font-weight: 500;
+}
+
+.keys dd {
+  margin: 0;
+  color: var(--muted);
 }
 
 .notice {
@@ -166,7 +238,7 @@ fieldset {
   position: relative;
   display: grid;
   place-items: center;
-  height: 22px;
+  height: 1.7rem;
   padding: 0 10px;
   border-radius: 5px;
   color: var(--option);
@@ -192,7 +264,7 @@ fieldset {
 
 button {
   flex-shrink: 0;
-  height: 26px;
+  height: 2rem;
   padding: 0 12px;
   border: 0;
   border-radius: 6px;
@@ -217,12 +289,24 @@ button.link {
   padding: 0;
   background: none;
   box-shadow: none;
-  color: LinkText;
   cursor: pointer;
 }
 
-button.link:hover {
+button.link,
+.row a {
+  color: LinkText;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+button.link:hover,
+.row a:hover {
   text-decoration: underline;
+}
+
+/* A row's link stands as tall as a row's button, so link rows keep the card's rhythm. */
+.row > a {
+  line-height: 2rem;
 }
 
 [hidden] {

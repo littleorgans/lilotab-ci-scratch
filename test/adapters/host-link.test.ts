@@ -1,18 +1,23 @@
-// Host link: popup port checks, late popups and channels ending before ready, against a fake chrome (07-tests 2.2,
-// AC-10, AC-12; 05-events 4.2 to 4.4).
+// Host link: popup port checks, late popups, channels ending before ready and the overlay's dwell wake, against a fake
+// chrome (07-tests 2.2, AC-10, AC-12; 05-events 2.3, 4.2 to 4.4).
 
-import { beforeEach, expect, test } from 'vite-plus/test';
-import { portName } from '../../src/core/index.ts';
+import { beforeEach, expect, test, vi } from 'vite-plus/test';
+import { portName, type Millis } from '../../src/core/index.ts';
+import type { ListSurface } from '../../src/hosts/list-view/index.ts';
+import { runSession } from '../../src/hosts/session/index.ts';
 import { registerEntry } from '../../src/worker/adapters/entry/index.ts';
 import { createHostLink } from '../../src/worker/adapters/host-link/index.ts';
 import { createTabs } from '../../src/worker/adapters/tabs/index.ts';
 import { startView } from '../host-fixtures.ts';
 import {
   collect,
+  createPort,
   extensionUrl,
   installFakeChrome,
+  noClosed,
   popupUrl,
   settle,
+  sleep,
   type FakeBrowser,
   type FakePort,
 } from './fake-chrome.ts';
@@ -26,12 +31,12 @@ beforeEach(() => {
 });
 
 // The host link with entry, so a toolbar click steps; the attempt launches its host on tab 11 in window 1.
-function launch(host: 'overlay' | 'popup') {
+function launch(host: 'overlay' | 'popup', dwell: Millis | null = null) {
   const { ingress, stepped } = collect();
   const hostLink = createHostLink('overlay.js');
   hostLink.onEvent(ingress);
-  registerEntry(ingress, () => createTabs().liveFacts());
-  if (host === 'overlay') hostLink.mountOverlay(A, 11, START);
+  registerEntry(ingress, () => createTabs().liveFacts(), noClosed);
+  if (host === 'overlay') hostLink.mountOverlay(A, 11, START, dwell);
   else hostLink.openPopup(A, 11, 1, START);
   return { hostLink, stepped };
 }
@@ -110,3 +115,50 @@ test.each([
     expect(stepped).toMatchObject([{ kind: 'hostStatus', attempt: A, status }]);
   },
 );
+
+// The page half of a channel: a session on its own port whose posts reach the worker's, mounted on a focused page.
+function hostOn(worker: FakePort): FakePort {
+  vi.stubGlobal('window', new EventTarget());
+  vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible', hasFocus: () => true }));
+  const page = createPort(worker.name);
+  page.postMessage = (m) => {
+    worker.onMessage.dispatch(m, worker);
+  };
+  const surface = { start: () => undefined, element: new EventTarget() } as unknown as ListSurface;
+  const mounted = {
+    surface,
+    owns: () => false,
+    latch: () => undefined,
+    unlatch: () => undefined,
+    hide: () => undefined,
+  };
+  runSession(page as unknown as chrome.runtime.Port, {
+    alive: () => true,
+    dispose: () => undefined,
+    decline: () => null,
+    mount: () => ({ ...mounted, remove: () => undefined }),
+    focused: () => Promise.resolve(),
+    closed: () => undefined,
+  });
+  for (const m of worker.posted) page.onMessage.dispatch(m, page);
+  return page;
+}
+
+// T-14, C-HOLD-01: the foreground page wakes the worker at the dwell due, as the worker's own timer may fire late in
+// a background process (05-events 2.3). The wake leaves out injection time; the ping follows ready.
+test.each([50, 50.75])('hostLink.wake: injection takes 20 ms from a dwell due at %s', async (dwell) => {
+  browser.gates['scripting.executeScript'] = sleep(20);
+  const { stepped } = launch('overlay', dwell);
+  await vi.advanceTimersByTimeAsync(20);
+  const worker = browser.connected[0];
+  if (!worker) throw new Error('no overlay port');
+  expect(worker.posted).toEqual([{ t: 'start', start: START, wake: dwell - 20 }]);
+  hostOn(worker);
+  await vi.advanceTimersByTimeAsync(29);
+  expect(stepped.map((e) => [e.kind, e.at])).toEqual([['hostStatus', 20]]);
+  await vi.advanceTimersByTimeAsync(Math.ceil(dwell) - 49);
+  expect(stepped).toMatchObject([
+    { kind: 'hostStatus', status: 'ready' },
+    { kind: 'host', at: Math.ceil(dwell), attempt: A, input: { kind: 'ping' } },
+  ]);
+});

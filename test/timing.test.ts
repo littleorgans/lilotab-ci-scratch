@@ -5,7 +5,7 @@ import { expect, onTestFinished, test, vi } from 'vite-plus/test';
 import { readTiming, TIMING_KEY, TIMING_MAX, type TimingRecord } from '../src/browser/timing.ts';
 import { init, step, type CoreEvent, type DeclineReason } from '../src/core/index.ts';
 import { createGestureLog } from '../src/worker/timing/record.ts';
-import { LIVE, esc, press, ready, release, status, tick, type Ev } from './interaction-harness.ts';
+import { LIVE, STORED, esc, press, ready, release, status, tick, type Ev } from './interaction-harness.ts';
 
 const ORIGIN = 1_700_000_000_000;
 
@@ -13,7 +13,7 @@ function setup() {
   const records: TimingRecord[] = [];
   const log = createGestureLog(ORIGIN, (r) => records.push(r));
   const ctx = {
-    model: init('boot', undefined, { version: 1 }, LIVE.two).model,
+    model: init('boot', undefined, STORED, LIVE.two).model,
     live: LIVE.two,
     last: null as string | null,
   };
@@ -113,6 +113,10 @@ test('a release that expires dwell is labelled release, and one after idle is no
   run(event(ready(170)));
   run(event(release(10_171)));
   expect(records[1]).toMatchObject({ shown: 71, input: null, outcome: 'cancel', reason: 'idle' });
+  run(event(press(20_000)));
+  run(event(ready(20_020)));
+  run(event(release(30_100))); // dwell shows the list, then the idle it starts expires before the release
+  expect(records[2]).toMatchObject({ input: null, outcome: 'cancel', reason: 'idle' });
 });
 
 // AC-02: preparation timed out before an interaction existed; only observed worker times are available.

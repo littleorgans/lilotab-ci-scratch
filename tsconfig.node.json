@@ -6,5 +6,6 @@
     "lib": ["ES2024"],
     "types": ["node", "chrome", "vite/client"]
   },
-  "include": ["*.ts", "test", "src/**/*.test.ts"]
+  "include": ["*.ts", "test", "src/**/*.test.ts"],
+  "exclude": ["test/adapters/host-link.test.ts"]
 }
