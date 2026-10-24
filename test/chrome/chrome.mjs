@@ -338,8 +338,24 @@ export class Chrome {
     );
     const page = await this.pageFor(id);
     await page.bringToFront();
-    await until(() => page.evaluate(() => document.hasFocus()));
+    await until(() => this.focused(page));
     return page;
+  }
+  // Whether the page's document, or a guest view it embeds, has focus. Edge shows a PDF in a guest view, a `webview`
+  // target under the page, and the outer document does not report focus held there.
+  async focused(page) {
+    if (await page.evaluate(() => document.hasFocus())) return true;
+    const { targetInfos } = await this.root.send('Target.getTargets');
+    const parent = targetInfos.find((t) => t.type === 'page' && t.url === page.url());
+    for (const guest of targetInfos.filter((t) => t.type === 'webview' && t.parentId === parent?.targetId)) {
+      const { sessionId } = await this.root.send('Target.attachToTarget', { targetId: guest.targetId, flatten: true });
+      try {
+        if (await this.eval(this.root.connection().session(sessionId), 'document.hasFocus()')) return true;
+      } finally {
+        await this.root.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      }
+    }
+    return false;
   }
   popupTargets() {
     return this.browser.targets().filter((t) => t.url().startsWith(this.extensionBase + 'src/hosts/popup/index.html#'));

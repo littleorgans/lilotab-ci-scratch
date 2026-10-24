@@ -58,7 +58,8 @@ try {
     }));
   else
     for (const { id, expected, fn } of scenarios.filter((s) => !option('--only') || s.id.includes(option('--only')))) {
-      await e.scenario(id, expected, async () => {
+      // Expected text can depend on the browser, known only once setup has run, so a function resolves it here.
+      await e.scenario(id, typeof expected === 'function' ? expected() : expected, async () => {
         const offset = (await c.workerMessages()).length;
         let result, reset;
         try {
