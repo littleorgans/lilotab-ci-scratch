@@ -20,6 +20,9 @@ export const HELD = mac
 // Assigned where the browser leaves the suggested shortcut unset (Edge owns Ctrl+Shift+E): the same held key with a
 // key the Chromium browsers leave free.
 const SIMULATED_SHORTCUT = 'Ctrl+Shift+9';
+// Vivaldi's bundled UI extension and its browser window page.
+const VIVALDI_EXTENSION = 'chrome-extension://mpognobbkildjkofajifpdfhcoklimli/';
+const VIVALDI_UI = `${VIVALDI_EXTENSION}window.html`;
 const probeSource = `(${installProbe.toString()})()`;
 // Harness profile processes as `pid ppid command` on Windows, which has no pgrep or ps; PowerShell filters by the
 // profile path, read from the environment to avoid quoting it.
@@ -200,6 +203,7 @@ export class Chrome {
     this.e.limits.push(
       'A targeted source page press can leave a real headless toolbar popup focused. That case minimizes and restores the source browser window to generate native window blur, and labels the observation as a substitute. Native OS toolbar outside dismissal remains unverified.',
     );
+    this.vivaldi = this.browser.targets().some((t) => t.url().startsWith(VIVALDI_EXTENSION));
     await this.simulateShortcut();
     await this.fixtures();
   }
@@ -354,15 +358,50 @@ export class Chrome {
     const info = targets.targetInfos.find((t) => t.url === page.url());
     if (!info) throw new Error('Fixture CDP tab target absent');
     const wall = await this.workerEval('Date.now()');
-    await this.root.send('Extensions.triggerAction', { id: this.extensionId, targetId: info.targetId });
+    // Vivaldi has no Chromium toolbar: Extensions.triggerAction crashes its browser process, so the press makes the
+    // call its own toolbar button makes.
+    if (this.vivaldi) {
+      const { windowId } = await this.workerEval(`chrome.tabs.get(${tabId})`);
+      await this.eval(
+        await until(() => this.vivaldiUi(windowId)),
+        `new Promise((resolve,reject)=>vivaldi.extensionActionUtils.executeExtensionAction(${JSON.stringify(this.extensionId)},${windowId},()=>chrome.runtime.lastError?reject(new Error(chrome.runtime.lastError.message)):resolve(true)))`,
+      );
+    } else await this.root.send('Extensions.triggerAction', { id: this.extensionId, targetId: info.targetId });
     return { wall };
+  }
+  // The session of Vivaldi's UI page drawing the window, once that page is up; null before.
+  async vivaldiUi(windowId) {
+    this.vivaldiWindows ??= new Map();
+    this.vivaldiTargets ??= new Set();
+    if (!this.vivaldiWindows.has(windowId))
+      for (const t of this.browser.targets()) {
+        if (t.url() !== VIVALDI_UI || this.vivaldiTargets.has(t)) continue;
+        const s = await t.createCDPSession();
+        const id = await this.eval(s, 'chrome.windows.getCurrent().then((w)=>w.id)').catch(() => null);
+        if (id === null) {
+          await s.detach().catch(() => {});
+          continue;
+        }
+        this.vivaldiTargets.add(t);
+        this.vivaldiWindows.set(id, s);
+      }
+    return this.vivaldiWindows.get(windowId) ?? null;
+  }
+  // Vivaldi's UI page can miss a tab that opened before the page was up: it then adds an active start page tab in its
+  // place and never shows the tab. In Vivaldi, waits until the tab's window page shows it.
+  async vivaldiHosts({ id, windowId }) {
+    if (!this.vivaldi) return;
+    await until(async () => {
+      const ui = await this.vivaldiUi(windowId);
+      return ui && this.eval(ui, `!!document.getElementById('tab-${id}')`);
+    }, 5000);
   }
   // Gives the tab the activeTab grant a real shortcut press gives, through one toolbar click; the popup closes again.
   async grant(tabId = this.source.id) {
     await this.focus(tabId);
     await this.toolbar(tabId);
-    const popup = await until(() => this.popupTarget(), 4000);
-    await this.closePopup(popup);
+    // Vivaldi's action.openPopup always rejects (Vivaldi bug VB-120122), so no popup follows its press.
+    if (!this.vivaldi) await this.closePopup(await until(() => this.popupTarget(), 4000));
     await pause(100);
     await this.focus(tabId);
   }
