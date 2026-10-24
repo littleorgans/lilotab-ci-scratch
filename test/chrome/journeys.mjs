@@ -1,11 +1,14 @@
-// End to end journeys JY-1 to JY-6 and the checks JY-7 to JY-9 over their traffic (07-tests 2.3). Each journey
-// asserts the outcome (the active tab, its window, what stayed open), never the timing path (07-tests 1, rule 6).
+// End to end journeys JY-1 to JY-6 and JY-10, and the checks JY-7 to JY-9 over their traffic (07-tests 2.3). Each
+// journey asserts the outcome (the active tab, its window, what stayed open), never the timing path (07-tests 1,
+// rule 6).
 import { browserPage, pause, until } from './support.mjs';
 import { HELD } from './chrome.mjs';
 import { state, active } from './behavior.mjs';
 
 const MARK = '__h1-control';
 const CONTROL_URL = `http://h1-control.invalid/${MARK}`;
+// The close key's CDP modifiers (C-SRCH-25): Ctrl+Cmd on macOS, Ctrl+Alt elsewhere.
+const CLOSE_MODIFIERS = process.platform === 'darwin' ? 6 : 3;
 
 // The first observation for which `ok` holds, or a last one read when none does in time.
 const settle = (read, ok, ms = 1500) =>
@@ -78,8 +81,8 @@ class Traffic {
     session.on('Log.entryAdded', ({ entry }) =>
       this.writes.push({ kind, sid, context: null, source: `log.${entry.source}`, text: entry.text, url: entry.url }),
     );
-    await session.send('Network.enable');
-    await session.send('Log.enable');
+    // Sent together, ahead of the commands the caller sends meanwhile, so a paused popup resumes sooner.
+    await Promise.all([session.send('Network.enable'), session.send('Log.enable')]);
     if (kind !== 'worker') return;
     session.on('Runtime.bindingCalled', ({ name, payload }) => {
       if (name === '__h1Storage') this.storage.push(JSON.parse(payload));
@@ -102,11 +105,16 @@ class Traffic {
   extensionPage(sid) {
     return [...this.contexts.values()].some((x) => x.sid === sid && x.isDefault && x.origin === this.origin);
   }
-  // The extension's own: the worker, its pages, and in a web page its isolated world or a request it initiated.
+  // The extension's own: the worker, its pages, and in a web page its isolated world or a request it initiated. A
+  // browser's own page (Opera's start page fetches its offers) is no web page, so its other origins are not.
   ownRequest(r) {
     if (!/^(https?|wss?|ftp):/i.test(r.url)) return false;
     if (r.kind === 'worker' || this.extensionPage(r.sid) || r.documentURL?.startsWith(this.origin)) return true;
-    return new URL(r.url).origin !== new URL(this.c.base).origin || JSON.stringify(r.initiator).includes(this.origin);
+    const webPage = /^https?:/i.test(r.documentURL ?? '');
+    return (
+      (webPage && new URL(r.url).origin !== new URL(this.c.base).origin) ||
+      JSON.stringify(r.initiator).includes(this.origin)
+    );
   }
   ownWrite(w) {
     if (w.kind === 'worker' || this.extensionPage(w.sid) || w.url?.startsWith(this.origin)) return true;
@@ -200,6 +208,53 @@ export function journeyScenarios(c, e, add) {
       return {
         pass: landed?.active && landed.front && landed.id === step.id,
         measured: { first: first.selected, stepped: stepped.selected, landed },
+      };
+    }),
+  );
+
+  add(
+    'JY-10-close-last-tab',
+    'C-SRCH-25, C-WIN-01, T-74: the close key on the only tab of another window closes it; its window leaves the strip and the highlight goes to the current tab',
+    restoring(async (made) => {
+      const w = await c.workerEval(
+        `chrome.windows.create({url:${JSON.stringify(`${c.base}/?name=Lone`)},focused:false,type:'normal'})`,
+      );
+      const [lone] = w.tabs;
+      made.push(lone);
+      await c.loaded(lone.id);
+      await c.focus(c.source.id);
+      const h = await c.open('overlay', { quickTap: 'flip', holdDelayMs: 50 }),
+        shown = await state(c, h);
+      let at = shown;
+      for (let n = 0; at.selected?.title !== 'H1 Lone' && n <= (shown.strip?.cells.length ?? 0); n++) {
+        await c.key(h, 'ArrowRight', HELD.modifier);
+        at = await state(c, h);
+      }
+      await c.key(h, 'w', CLOSE_MODIFIERS);
+      const after = await settle(
+        () => state(c, h),
+        (s) => s.strip?.cells.length === shown.strip?.cells.length - 1,
+      );
+      const removed = await settle(
+        () => c.workerEval(`chrome.tabs.get(${lone.id}).then(()=>false,()=>true)`),
+        (x) => x,
+      );
+      await c.cancel(h);
+      return {
+        pass:
+          at.selected?.title === 'H1 Lone' &&
+          removed &&
+          after.shown &&
+          after.strip?.cells.length === shown.strip?.cells.length - 1 &&
+          after.strip.cells[0]?.selected &&
+          after.selected?.title === 'H1 Source',
+        measured: {
+          cells: shown.strip?.cells.length,
+          at: at.selected,
+          removed,
+          after: after.strip,
+          row: after.selected,
+        },
       };
     }),
   );
@@ -397,17 +452,45 @@ export function journeyScenarios(c, e, add) {
   );
   add(
     'JY-5-toolbar-search-esc',
-    'C-SRCH-14, C-POP-04: Esc in toolbar search closes the popup and changes nothing',
+    'C-SRCH-14, C-POP-04: in toolbar search, Esc with text empties the field and the popup stays, listing every tab; Esc again closes the popup and changes nothing',
     async () => {
-      const h = await c.open('popup', { via: 'toolbar' });
+      const h = await c.open('popup', { via: 'toolbar' }),
+        opened = await state(c, h);
+      await h.s.send('Input.insertText', { text: 'Window7' });
+      const typed = await settle(
+        () => state(c, h),
+        (s) => s.rows?.length < opened.rows.length,
+      );
+      await c.key(h, 'Escape');
+      const cleared = await settle(
+        () => state(c, h),
+        (s) => s.rows?.length === opened.rows.length,
+      );
+      await pause(100);
+      const stayed = c.popupTargets().length === 1 && (await state(c, h)).connected;
       await c.key(h, 'Escape');
       const closed = await settle(() => c.popupTargets().length === 0, Boolean);
       await pause(100);
       const after = await active(c, c.source.windowId),
         focusRequests = (await c.focusRequests()).filter((r) => r.wall >= h.invokedAt);
       return {
-        pass: closed && after.id === c.source.id && focusRequests.length === 0,
-        measured: { closed, after, focusRequests },
+        pass:
+          typed.rows?.length < opened.rows.length &&
+          cleared.fieldText === '' &&
+          cleared.fieldFocused &&
+          cleared.rows?.length === opened.rows.length &&
+          stayed &&
+          closed &&
+          after.id === c.source.id &&
+          focusRequests.length === 0,
+        measured: {
+          rows: { opened: opened.rows?.length, typed: typed.rows?.length, cleared: cleared.rows?.length },
+          cleared: { fieldText: cleared.fieldText, fieldFocused: cleared.fieldFocused },
+          stayed,
+          closed,
+          after,
+          focusRequests,
+        },
       };
     },
   );

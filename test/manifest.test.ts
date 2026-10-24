@@ -1,7 +1,7 @@
 import { expect, test } from 'vite-plus/test';
 import manifest from '../manifest.config.ts';
 import pkg from '../package.json' with { type: 'json' };
-import { SWITCH_COMMAND } from '../src/worker/names.ts';
+import { SEARCH_COMMAND, SWITCH_COMMAND } from '../src/worker/names.ts';
 
 const resolved =
   typeof manifest === 'function' ? await manifest({ command: 'build', mode: 'production' }) : await manifest;
@@ -14,14 +14,20 @@ test.each<[string, (m: typeof resolved) => unknown, unknown]>([
     (m) => m.permissions,
     ['storage', 'tabs', 'favicon', 'activeTab', 'scripting'],
   ],
+  ['C-PERM-05: one optional permission, sessions', (m) => m.optional_permissions, ['sessions']],
   ['C-PERM-01: no host permissions', (m) => [m.host_permissions, m.optional_host_permissions], [undefined, undefined]],
   ['C-PERM-02: no content scripts', (m) => m.content_scripts, undefined],
   ['C-PRIV-06: private windows not allowed', (m) => m.incognito, 'not_allowed'],
   ['C-PERM-04: minimum Chrome 148', (m) => m.minimum_chrome_version, '148'],
   [
-    'C-KEY-01, C-KEY-02: the switch command is Cmd+E on macOS and Ctrl+Shift+E elsewhere',
+    'C-KEY-01, C-KEY-02: the switch command is Cmd+E on macOS and Alt+Q elsewhere',
     (m) => m.commands?.[SWITCH_COMMAND]?.suggested_key,
-    { default: 'Ctrl+Shift+E', mac: 'Command+E' },
+    { default: 'Alt+Q', mac: 'Command+E' },
+  ],
+  [
+    'C-KEY-12: the search command has a description and no suggested key',
+    (m) => [typeof m.commands?.[SEARCH_COMMAND]?.description, m.commands?.[SEARCH_COMMAND]?.suggested_key],
+    ['string', undefined],
   ],
   [
     'KB-12: the toolbar title is the product name',

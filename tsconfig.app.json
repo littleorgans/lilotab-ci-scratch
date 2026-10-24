@@ -6,6 +6,6 @@
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "types": ["chrome", "@crxjs/vite-plugin/client", "vite/client"]
   },
-  "include": ["src"],
+  "include": ["src", "test/adapters/host-link.test.ts"],
   "exclude": ["src/core", "src/**/*.test.ts"]
 }

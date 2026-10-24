@@ -1,7 +1,8 @@
 // Welcome page: opened once on install; shows the shortcut or how to set one (C-KEY-10, C-KEY-11). Writes nothing.
 
 import '../page.css';
-import { WELCOME_TEXT as T } from '../../strings.ts';
+import { SHORTCUT_TEXT, WELCOME_TEXT as T } from '../../strings.ts';
+import { SWITCH_COMMAND } from '../../worker/names.ts';
 import { el } from '../dom.ts';
 import { shortcutBlock, type Shortcut } from '../shortcut.ts';
 
@@ -19,7 +20,15 @@ document.title = T.title;
 document.body.append(
   el('main', {}, [
     el('h1', {}, [T.title]),
-    el('section', { class: 'card' }, [shortcutBlock(showUsage)]),
+    el('section', { class: 'card' }, [
+      shortcutBlock({
+        command: SWITCH_COMMAND,
+        label: SHORTCUT_TEXT.switchLabel,
+        needsModifier: true,
+        suggested: true,
+        onRead: showUsage,
+      }),
+    ]),
     usage,
     settings,
   ]),

@@ -173,6 +173,7 @@ export function inspectPanel() {
   const style = getComputedStyle(this),
     strip = this.querySelector('.strip'),
     head = this.querySelector('.head'),
+    input = this.querySelector('.field'),
     root = this.getRootNode();
   const hidden = (e) => !!e.closest('[aria-hidden="true"]');
   const rowInfo = (e) => ({
@@ -214,8 +215,12 @@ export function inspectPanel() {
     head: rect(head),
     headLayoutHeight: head?.offsetHeight ?? null,
     search: liveList?.classList.contains('search') ?? false,
-    field: rect(this.querySelector('.field')),
-    fieldFocused: !!this.querySelector('.field') && root.activeElement === this.querySelector('.field'),
+    field: rect(input),
+    fieldFocused: !!input && root.activeElement === input,
+    hostEditable: root.host?.contentEditable ?? null, // the overlay host; null in the popup
+    fieldText: input?.value ?? null,
+    fieldSelection: input ? [input.selectionStart, input.selectionEnd] : null,
+    notice: this.querySelector('.notice')?.textContent ?? '',
     listFocused: root.activeElement === liveList,
     hasFocus: document.hasFocus(),
     active: root.activeElement?.className ?? document.activeElement?.id,
